@@ -1,0 +1,18 @@
+[package]
+name = "zfilexfer"
+version = "0.0.1"
+authors = [ "Peter Hayes <peter.hayes@betweenlines.co.uk>" ]
+license = "MPL-2.0"
+description = "File transfer over ZMQ sockets."
+keywords = ["zfilexfer"]
+repository = "https://github.com/betweenlines/zfilexfer"
+
+[dev-dependencies]
+
+tempdir = "0.3.*"
+
+[dependencies]
+
+czmq = { git = "https://github.com/petehayes102/rust-czmq.git", branch = "dev" }
+# zdaemon = { git = "https://github.com/betweenlines/zdaemon.git", branch = "dev" }
+zdaemon = { path = "../zdaemon" }
