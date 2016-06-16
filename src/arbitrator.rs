@@ -172,3 +172,39 @@ impl TimedChunk {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use chunk::Chunk;
+    use czmq::{ZSock, ZSockType, ZSys};
+    use std::fs::File;
+    use std::rc::Rc;
+    use super::*;
+    use tempdir::TempDir;
+
+    #[test]
+    fn test_arbitrator_new() {
+        ZSys::init();
+
+        assert!(Arbitrator::new(Rc::new(ZSock::new(ZSockType::ROUTER)), 0).is_ok());
+    }
+
+    #[test]
+    fn test_arbitrator_queue_release() {
+        let tempdir = TempDir::new("chunk_test_create").unwrap();
+        let path = format!("{}/test", tempdir.path().to_str().unwrap());
+        File::create(&path).unwrap();
+        let chunk = Chunk::create(&path, 0).unwrap();
+
+        let mut arbitrator = Arbitrator::new(Rc::new(ZSock::new(ZSockType::ROUTER)), 0).unwrap();
+        assert!(arbitrator.queue(&chunk, "abc".as_bytes()).is_ok());
+        assert_eq!(arbitrator.queue.read().unwrap().len(), 1);
+        assert!(arbitrator.release(&chunk, "abc".as_bytes()).is_ok());
+        assert_eq!(arbitrator.queue.read().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn test_arbitrator_request() {
+        
+    }
+}

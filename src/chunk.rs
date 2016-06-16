@@ -57,13 +57,13 @@ impl Chunk {
     // }
 
     pub fn recv(&mut self, router_id: &[u8], data: Vec<u8>, chunk_size: usize) -> Result<()> {
-        let sock = try!(ZSock::new_push("inproc://zfilexfer_sink"));
+        let sock = try!(ZSock::new_push(">inproc://zfilexfer_sink"));
         sock.set_sndtimeo(Some(1000));
 
         self.do_recv(router_id, data, chunk_size, sock)
     }
 
-    fn do_recv(&mut self, router_id: &[u8], data: Vec<u8>, chunk_size: usize, sock: ZSock) -> Result<()> {
+    pub fn do_recv(&mut self, router_id: &[u8], data: Vec<u8>, chunk_size: usize, sock: ZSock) -> Result<()> {
         if self.join_handle.is_some() {
             self.join_handle.take().unwrap().join().unwrap();
         }
@@ -73,21 +73,19 @@ impl Chunk {
         let router_id = router_id.to_vec();
 
         self.join_handle = Some(spawn(move|| {
-            let mut ok = false;
-            if let Ok(mut file) = OpenOptions::new().write(true).create(false).open(&path) {
-                if file.seek(SeekFrom::Start((chunk_index * chunk_size) as u64)).is_ok() {
-                    if file.write_all(&data).is_ok() {
-                        ok = true;
-                    }
-                }
-            }
+            let result = || -> Result<()> {
+                let mut file = try!(OpenOptions::new().write(true).create(false).open(&path));
+                try!(file.seek(SeekFrom::Start((chunk_index * chunk_size) as u64)));
+                try!(file.write_all(&data));
+                Ok(())
+            }();
 
             // If we can't send a message, it isn't recoverable by
             // the application, so panicking is appropriate.
             let msg = ZMsg::new();
             msg.addbytes(&router_id).unwrap();
             msg.addstr(&chunk_index.to_string()).unwrap();
-            msg.addstr(if ok { "1" } else { "0" }).unwrap();
+            msg.addstr(if result.is_ok() { "1" } else { "0" }).unwrap();
             msg.send(&sock).unwrap();
         }));
 
@@ -101,8 +99,9 @@ impl Chunk {
 
 #[cfg(test)]
 mod tests {
-    use czmq::ZSock;
-    use std::fs::File;
+    use czmq::{ZMsg, ZSys};
+    use std::fs::{File, OpenOptions};
+    use std::io::Read;
     use super::*;
     use tempdir::TempDir;
 
@@ -119,14 +118,25 @@ mod tests {
 
     #[test]
     fn test_recv() {
+        ZSys::init();
+
         let tempdir = TempDir::new("chunk_test_create").unwrap();
         let path = format!("{}/test", tempdir.path().to_str().unwrap());
-        File::create(&path).unwrap();
 
-        let sock = ZSock::new_push("inproc://zfilexfer_sink").unwrap();
-        sock.set_sndtimeo(Some(500));
+        let mut fh = OpenOptions::new().create(true).read(true).write(true).open(&path).unwrap();
+        fh.set_len(6).unwrap();
 
-        let mut chunk = Chunk::create(&path, 0).unwrap();
-        chunk.do_recv("abc".as_bytes(), Vec::new(), 0, sock).unwrap();
+        let (thread, sink) = ZSys::create_pipe().unwrap();
+        let mut chunk = Chunk::create(&path, 1).unwrap();
+        chunk.do_recv("abc".as_bytes(), "abc".as_bytes().to_vec(), 3, thread).unwrap();
+
+        let msg = ZMsg::recv(&sink).unwrap();
+        let _ = msg.popstr();
+        let _ = msg.popstr();
+        assert_eq!(msg.popstr().unwrap().unwrap(), "1");
+
+        let mut content = Vec::new();
+        fh.read_to_end(&mut content).unwrap();
+        assert_eq!(content, vec![0, 0, 0, 97, 98, 99]);
     }
 }

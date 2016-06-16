@@ -14,5 +14,4 @@ tempdir = "0.3"
 [dependencies]
 
 czmq = { git = "https://github.com/petehayes102/rust-czmq.git", branch = "dev" }
-# zdaemon = { git = "https://github.com/betweenlines/zdaemon.git", branch = "dev" }
-zdaemon = { path = "../zdaemon" }
+zdaemon = { git = "https://github.com/betweenlines/zdaemon.git", branch = "dev" }
