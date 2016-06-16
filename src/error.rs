@@ -14,19 +14,28 @@ pub type Result<T> = result::Result<T, Error>;
 
 #[derive(Debug)]
 pub enum Error {
+    ChunkFail,
     ChunkIndex,
     Czmq(czmq::Error),
+    FileFail,
+    InvalidFilePath,
     InvalidRequest,
     Io(io::Error),
     ModeRecv,
     ModeSend,
 }
 
+unsafe impl Send for Error {}
+unsafe impl Sync for Error {}
+
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match *self {
+            Error::ChunkFail => write!(f, "Failed to save chunk to file"),
             Error::ChunkIndex => write!(f, "Chunk index not in file"),
             Error::Czmq(ref e) => write!(f, "CZMQ error: {}", e),
+            Error::FileFail => write!(f, "Failed to upload file"),
+            Error::InvalidFilePath => write!(f, "Path does not exist or is not a file"),
             Error::InvalidRequest => write!(f, "Invalid request"),
             Error::Io(ref e) => write!(f, "IO error: {}", e),
             Error::ModeRecv => write!(f, "Struct is in wrong mode for receiving"),
@@ -38,8 +47,11 @@ impl fmt::Display for Error {
 impl error::Error for Error {
     fn description(&self) -> &str {
         match *self {
+            Error::ChunkFail => "Failed to save chunk to file",
             Error::ChunkIndex => "Chunk index not in file",
             Error::Czmq(ref e) => e.description(),
+            Error::FileFail => "Failed to upload file",
+            Error::InvalidFilePath => "Path does not exist or is not a file",
             Error::InvalidRequest => "Invalid request",
             Error::Io(ref e) => e.description(),
             Error::ModeRecv => "Struct is in wrong mode for receiving",

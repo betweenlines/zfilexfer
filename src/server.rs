@@ -24,9 +24,9 @@ pub struct Server {
 }
 
 impl Server {
-    pub fn new(router: ZSock, chunk_size: usize) -> Result<Server> {
+    pub fn new(router: ZSock, chunk_size: usize, upload_slots: u32) -> Result<Server> {
         let router_rc = Rc::new(router);
-        let arbitrator = Arbitrator::new(router_rc.clone());
+        let arbitrator = try!(Arbitrator::new(router_rc.clone(), upload_slots));
 
         Ok(Server {
             router: router_rc,
@@ -77,9 +77,9 @@ impl Endpoint for Server {
                             Err(_) => return self.reply_err(&router_id, Error::InvalidRequest),
                         };
 
-                        let file = match File::create(&self.arbitrator, &path, size, self.chunk_size) {
+                        let file = match File::create(&mut self.arbitrator, &router_id, &path, size, self.chunk_size) {
                             Ok(f) => f,
-                            Err(_) => return self.reply_err(&router_id, Error::InvalidRequest),
+                            Err(e) => return self.reply_err(&router_id, e),
                         };
 
                         self.files.insert(router_id, file);
@@ -99,12 +99,9 @@ impl Endpoint for Server {
                             Err(_) => return self.reply_err(&router_id, Error::InvalidRequest),
                         };
 
-                        let chunk = match msg.popstr().unwrap() {
-                            Ok(s) => s.into_bytes(),
-                            Err(b) => b,
-                        };
+                        let chunk = try!(msg.popbytes()).unwrap();
 
-                        if let Err(e) = self.files.get(&router_id).unwrap().recv(&router_id, index, chunk) {
+                        if let Err(e) = self.files.get_mut(&router_id).unwrap().recv(&router_id, index, chunk) {
                             return self.reply_err(&router_id, e);
                         }
                     },
@@ -114,37 +111,34 @@ impl Endpoint for Server {
         }
         else if *sock == self.sink {
             if !self.files.contains_key(&router_id) {
-                return self.reply_err(&router_id, Error::InvalidRequest);
+                return Err(Error::InvalidRequest.into());
             }
 
-            let msg = try!(ZMsg::expect_recv(sock, 3, Some(3), false));
+            let msg = try!(ZMsg::expect_recv(sock, 2, Some(2), false));
 
             // We can make the assumption here that the data is well
             // formed, as there are no user-provided fields.
             let index = msg.popstr().unwrap().unwrap().parse::<usize>().unwrap();
-            let success = msg.popstr().unwrap().unwrap().parse::<bool>().unwrap();
+            let success = if msg.popstr().unwrap().unwrap() == "1" { true } else { false };
 
             let mut file = self.files.get_mut(&router_id).unwrap();
 
-            // Don't use reply_err() as any errors here indicate a
-            // deeper problem that is unrelated to a specific file.
-            if let Err(e) = file.sink(&self.arbitrator, index, success) {
+            if let Err(e) = file.sink(&mut self.arbitrator, &router_id, index, success) {
                 return Err(e.into());
             }
 
-            if file.is_complete() {
-                match file.save() {
-                    Ok(_) => {
-                        let msg = try!(ZMsg::new_ok());
-                        try!(msg.pushbytes(&router_id));
-                        try!(msg.send(&*self.router));
-                    },
-                    Err(e) => {
-                        let msg = try!(ZMsg::new_err(&e.into()));
-                        try!(msg.pushbytes(&router_id));
-                        try!(msg.send(&*self.router));
-                    },
-                }
+            if file.is_error() {
+                try!(ZMsg::new_err(&Error::FileFail.into()));
+                try!(msg.pushbytes(&router_id));
+                try!(msg.send(&*self.router));
+            }
+            else if file.is_complete() {
+                let msg = match file.save() {
+                    Ok(_) => try!(ZMsg::new_ok()),
+                    Err(e) => try!(ZMsg::new_err(&e.into())),
+                };
+                try!(msg.pushbytes(&router_id));
+                try!(msg.send(&*self.router));
             }
         } else {
             unimplemented!();
@@ -157,25 +151,26 @@ impl Endpoint for Server {
 #[cfg(test)]
 mod tests {
     use arbitrator::Arbitrator;
-    use czmq::{RawInterface, zsys_init, ZFrame, ZMsg, ZSock, ZSockType};
+    use czmq::{RawInterface, ZFrame, ZMsg, ZSock, ZSockType, ZSys};
     use error::Error;
     use file::File;
     use std::collections::HashMap;
     use std::rc::Rc;
     use super::*;
+    use tempdir::TempDir;
     use zdaemon::Endpoint;
 
     #[test]
     fn test_new() {
-        zsys_init();
+        ZSys::init();
 
         let router = ZSock::new(ZSockType::ROUTER);
-        assert!(Server::new(router, 1024).is_ok());
+        assert!(Server::new(router, 1024, 0).is_ok());
     }
 
     #[test]
     fn test_reply_err() {
-        zsys_init();
+        ZSys::init();
 
         let dealer = ZSock::new_dealer("inproc://server_test_reply_err").unwrap();
         dealer.set_sndtimeo(Some(500));
@@ -191,7 +186,7 @@ mod tests {
         };
         router.flush();
 
-        let server = new_server(router);
+        let server = new_server(router, true);
         assert!(server.reply_err(&router_id, Error::InvalidRequest).is_ok());
 
         let reply = ZFrame::recv(&dealer).unwrap().data().unwrap().unwrap();
@@ -200,7 +195,7 @@ mod tests {
 
     #[test]
     fn test_recv_new() {
-        zsys_init();
+        ZSys::init();
 
         let dealer = ZSock::new_dealer("inproc://server_test_recv_new").unwrap();
         dealer.set_sndtimeo(Some(500));
@@ -210,7 +205,7 @@ mod tests {
         router.set_rcvtimeo(Some(500));
         let router_dup = ZSock::from_raw(router.borrow_raw(), false);
 
-        let mut server = new_server(router);
+        let mut server = new_server(router, true);
 
         let msg = ZMsg::new();
         msg.addstr("NEW").unwrap();
@@ -225,9 +220,11 @@ mod tests {
         assert_eq!(msg.popstr().unwrap().unwrap(), "Err");
         assert_eq!(msg.popstr().unwrap().unwrap(), "Invalid request");
 
+        let tempdir = TempDir::new("server_test_recv_new").unwrap();
+
         let msg = ZMsg::new();
         msg.addstr("NEW").unwrap();
-        msg.addstr("/path/to/file").unwrap();
+        msg.addstr(&format!("{}/testfile", tempdir.path().to_str().unwrap())).unwrap();
         msg.addstr("10240").unwrap();
         msg.send(&dealer).unwrap();
 
@@ -239,7 +236,7 @@ mod tests {
 
     #[test]
     fn test_recv_chunk() {
-        zsys_init();
+        ZSys::init();
 
         let dealer = ZSock::new_dealer("inproc://server_test_recv_chunk").unwrap();
         dealer.set_sndtimeo(Some(500));
@@ -256,7 +253,7 @@ mod tests {
         };
         router.flush();
 
-        let mut server = new_server(router);
+        let mut server = new_server(router, true);
 
         let msg = ZMsg::new();
         msg.addstr("CHUNK").unwrap();
@@ -268,7 +265,8 @@ mod tests {
         assert_eq!(msg.popstr().unwrap().unwrap(), "Err");
         assert_eq!(msg.popstr().unwrap().unwrap(), "Invalid request");
 
-        let file = File::create(&server.arbitrator, "/path/to/file", 0, 1).unwrap();
+        let tempdir = TempDir::new("server_test_recv_chunk").unwrap();
+        let file = File::create(&mut server.arbitrator, "abc".as_bytes(), &format!("{}/testfile", tempdir.path().to_str().unwrap()), 0, 1).unwrap();
         server.files.insert(router_id, file);
 
         let msg = ZMsg::new();
@@ -284,12 +282,45 @@ mod tests {
         assert_eq!(msg.popstr().unwrap().unwrap(), "Chunk index not in file");
     }
 
-    fn new_server(router: ZSock) -> Server {
+    #[test]
+    fn test_recv_sink() {
+        ZSys::init();
+
+        let worker = ZSock::new_push("inproc://server_test_recv_sink").unwrap();
+        let sink = ZSock::new_pull("inproc://server_test_recv_sink").unwrap();
+        let sink_dup = ZSock::from_raw(sink.borrow_raw(), false);
+
+        let mut server = new_server(sink, false);
+        let tempdir = TempDir::new("server_test_recv_chunk").unwrap();
+        let file = File::create(&mut server.arbitrator, "abc".as_bytes(), &format!("{}/testfile", tempdir.path().to_str().unwrap()), 1, 1).unwrap();
+        server.files.insert("abc".as_bytes().into(), file);
+
+        let msg = ZMsg::new();
+        msg.addstr("abc").unwrap();
+        msg.addstr("0").unwrap();
+        msg.addstr("1").unwrap();
+        msg.send(&worker).unwrap();
+
+        assert!(server.recv(&sink_dup).is_ok());
+    }
+
+    fn new_server(sock: ZSock, is_router: bool) -> Server {
+        let router;
+        let sink;
+        if is_router {
+            router = sock;
+            sink = ZSock::new(ZSockType::PULL);
+        } else {
+            router = ZSock::new(ZSockType::ROUTER);
+            sink = sock;
+        }
+
         let router_rc = Rc::new(router);
-        let arbitrator = Arbitrator::new(router_rc.clone());
+        let arbitrator = Arbitrator::new(router_rc.clone(), 0).unwrap();
+
         Server {
             router: router_rc,
-            sink: ZSock::new(ZSockType::PULL),
+            sink: sink,
             chunk_size: 1024,
             files: HashMap::new(),
             arbitrator: arbitrator,
