@@ -36,7 +36,7 @@ impl Chunk {
     //         id: id,
     //     })
     // }
-    //
+
     pub fn create<P: AsRef<Path>>(path: P, index: usize) -> Result<Chunk> {
         let path = path.as_ref();
 
@@ -49,6 +49,15 @@ impl Chunk {
             index: index,
             join_handle: None,
         })
+    }
+
+    #[cfg(test)]
+    pub fn test_new<P: AsRef<Path>>(path: P, index: usize) -> Chunk {
+        Chunk {
+            path: path.as_ref().to_owned(),
+            index: index,
+            join_handle: None
+        }
     }
 
     // pub fn send(&self, sock: &ZSock) -> Result<()> {

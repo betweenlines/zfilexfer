@@ -14,7 +14,10 @@ use std::sync::{Arc, RwLock};
 use std::thread::{JoinHandle, spawn};
 use std::time::Instant;
 
+#[cfg(not(test))]
 const CHUNK_TIMEOUT: u64 = 60;
+#[cfg(test)]
+const CHUNK_TIMEOUT: u64 = 1;
 
 pub struct Arbitrator {
     router: Rc<ZSock>,
@@ -27,7 +30,9 @@ pub struct Arbitrator {
 impl Drop for Arbitrator {
     fn drop(&mut self) {
         self.timer_comm.signal(0).unwrap();
-        self.timer_handle.take().unwrap().join().unwrap();
+        if self.timer_handle.is_some() {
+            self.timer_handle.take().unwrap().join().unwrap();
+        }
     }
 }
 
@@ -77,6 +82,7 @@ impl Arbitrator {
         match index {
             Some(i) => {
                 queue.remove(i);
+                self.slots += 1;
                 Ok(())
             },
             None => Err(Error::ChunkIndex),
@@ -116,7 +122,7 @@ impl Timer {
     fn new(comm: ZSock, chunks: Arc<RwLock<Vec<TimedChunk>>>) -> Result<Timer> {
         Ok(Timer {
             chunks: chunks,
-            sink: try!(ZSock::new_push("inproc://zfilexfer_sink")),
+            sink: try!(ZSock::new_push(">inproc://zfilexfer_sink")),
             comm: comm,
         })
     }
@@ -166,7 +172,7 @@ impl TimedChunk {
 
     fn is_expired(&self) -> bool {
         if self.timestamp.is_some() {
-            self.timestamp.as_ref().unwrap().elapsed().as_secs() > CHUNK_TIMEOUT
+            self.timestamp.as_ref().unwrap().elapsed().as_secs() >= CHUNK_TIMEOUT
         } else {
             false
         }
@@ -176,11 +182,13 @@ impl TimedChunk {
 #[cfg(test)]
 mod tests {
     use chunk::Chunk;
-    use czmq::{ZSock, ZSockType, ZSys};
-    use std::fs::File;
+    use czmq::{ZMsg, ZSock, ZSockType, ZSys};
     use std::rc::Rc;
+    use std::sync::{Arc, RwLock};
+    use std::thread::{sleep, spawn};
+    use std::time::{Duration, Instant};
     use super::*;
-    use tempdir::TempDir;
+    use super::{TimedChunk, Timer};
 
     #[test]
     fn test_arbitrator_new() {
@@ -191,20 +199,117 @@ mod tests {
 
     #[test]
     fn test_arbitrator_queue_release() {
-        let tempdir = TempDir::new("chunk_test_create").unwrap();
-        let path = format!("{}/test", tempdir.path().to_str().unwrap());
-        File::create(&path).unwrap();
-        let chunk = Chunk::create(&path, 0).unwrap();
+        ZSys::init();
 
-        let mut arbitrator = Arbitrator::new(Rc::new(ZSock::new(ZSockType::ROUTER)), 0).unwrap();
+        let chunk = Chunk::test_new("/path/to/file", 0);
+
+        let mut arbitrator = Arbitrator::new(Rc::new(ZSock::new(ZSockType::ROUTER)), 1).unwrap();
         assert!(arbitrator.queue(&chunk, "abc".as_bytes()).is_ok());
         assert_eq!(arbitrator.queue.read().unwrap().len(), 1);
+        assert_eq!(arbitrator.slots, 0);
         assert!(arbitrator.release(&chunk, "abc".as_bytes()).is_ok());
         assert_eq!(arbitrator.queue.read().unwrap().len(), 0);
+        assert_eq!(arbitrator.slots, 1);
     }
 
     #[test]
     fn test_arbitrator_request() {
-        
+        ZSys::init();
+
+        let (client, router) = ZSys::create_pipe().unwrap();
+        client.set_rcvtimeo(Some(500));
+
+        let (comm, thread) = ZSys::create_pipe().unwrap();
+
+        let chunks = vec![
+            TimedChunk::new("abc".as_bytes(), 0),
+            TimedChunk::new("abc".as_bytes(), 1),
+            TimedChunk::new("abc".as_bytes(), 2),
+            TimedChunk::new("def".as_bytes(), 0),
+            TimedChunk::new("def".as_bytes(), 1),
+            TimedChunk::new("def".as_bytes(), 2),
+        ];
+
+        {
+            let mut arbitrator = Arbitrator {
+                router: Rc::new(router),
+                queue: Arc::new(RwLock::new(chunks)),
+                timer_handle: None,
+                timer_comm: comm,
+                slots: 3,
+            };
+
+            arbitrator.request().unwrap();
+
+            for x in 0..3 {
+                let msg = ZMsg::recv(&client).unwrap();
+                assert_eq!(&msg.popstr().unwrap().unwrap(), "abc");
+                assert_eq!(&msg.popstr().unwrap().unwrap(), "CHUNK");
+                assert_eq!(msg.popstr().unwrap().unwrap(), x.to_string());
+            }
+
+            assert!(client.recv_str().is_err());
+
+            let chunk = Chunk::test_new("/path/to/file", 0);
+            arbitrator.release(&chunk, "abc".as_bytes()).unwrap();
+            arbitrator.request().unwrap();
+
+            let msg = ZMsg::recv(&client).unwrap();
+            assert_eq!(&msg.popstr().unwrap().unwrap(), "def");
+            assert_eq!(&msg.popstr().unwrap().unwrap(), "CHUNK");
+            assert_eq!(msg.popstr().unwrap().unwrap(), "0");
+        }
+
+        thread.wait().unwrap();
+    }
+
+    #[test]
+    fn test_timer_new() {
+        ZSys::init();
+
+        assert!(Timer::new(ZSock::new(ZSockType::REQ), Arc::new(RwLock::new(Vec::new()))).is_ok());
+    }
+
+    #[test]
+    fn test_timer_run() {
+        ZSys::init();
+
+        let (client, server) = ZSys::create_pipe().unwrap();
+        let (comm, thread) = ZSys::create_pipe().unwrap();
+        client.set_rcvtimeo(Some(1500));
+        thread.set_rcvtimeo(Some(1000));
+
+        let mut c = TimedChunk::new("abc".as_bytes(), 0);
+        c.start();
+
+        let timer = Timer {
+            chunks: Arc::new(RwLock::new(vec![
+                c,
+            ])),
+            sink: server,
+            comm: thread,
+        };
+        let handle = spawn(|| timer.run());
+
+        let msg = ZMsg::recv(&client).unwrap();
+        assert_eq!(msg.popstr().unwrap().unwrap(), "abc");
+        assert_eq!(msg.popstr().unwrap().unwrap(), "0");
+        assert_eq!(msg.popstr().unwrap().unwrap(), "0");
+
+        comm.signal(0).unwrap();
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn test_chunk_is_expired() {
+        let timed = TimedChunk {
+            router_id: vec![97, 98, 99],
+            index: 0,
+            timestamp: Some(Instant::now()),
+        };
+
+        sleep(Duration::from_secs(1));
+
+        assert!(timed.is_expired());
     }
 }
