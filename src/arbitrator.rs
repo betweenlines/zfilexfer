@@ -67,26 +67,30 @@ impl Arbitrator {
 
     pub fn release(&mut self, chunk: &Chunk, router_id: &[u8]) -> Result<()> {
         let router_id = router_id.to_vec();
-        let mut queue = self.queue.write().unwrap();
-        let mut index: Option<usize> = None;
-        let mut x = 0;
-        for c in queue.iter_mut() {
-            if c.router_id == router_id && c.index == chunk.get_index() {
-                index = Some(x);
-                break;
+        {
+            let mut queue = self.queue.write().unwrap();
+            let mut index: Option<usize> = None;
+            let mut x = 0;
+            for c in queue.iter_mut() {
+                if c.router_id == router_id && c.index == chunk.get_index() {
+                    index = Some(x);
+                    break;
+                }
+
+                x += 1;
             }
 
-            x += 1;
+            match index {
+                Some(i) => {
+                    queue.remove(i);
+                    self.slots += 1;
+                },
+                None => return Err(Error::ChunkIndex),
+            }
         }
 
-        match index {
-            Some(i) => {
-                queue.remove(i);
-                self.slots += 1;
-                Ok(())
-            },
-            None => Err(Error::ChunkIndex),
-        }
+        try!(self.request());
+        Ok(())
     }
 
     fn request(&mut self) -> Result<()> {
@@ -149,12 +153,12 @@ impl Timer {
 
 struct TimedChunk {
     router_id: Vec<u8>,
-    index: usize,
+    index: u64,
     timestamp: Option<Instant>,
 }
 
 impl TimedChunk {
-    fn new(router_id: &[u8], index: usize) -> TimedChunk {
+    fn new(router_id: &[u8], index: u64) -> TimedChunk {
         TimedChunk {
             router_id: router_id.to_vec(),
             index: index,

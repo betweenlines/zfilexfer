@@ -18,20 +18,18 @@ use zdaemon::{Endpoint, Error as DError, ZMsgExtended};
 pub struct Server {
     router: Rc<ZSock>,
     sink: ZSock,
-    chunk_size: usize,
     files: HashMap<Vec<u8>, File>,
     arbitrator: Arbitrator,
 }
 
 impl Server {
-    pub fn new(router: ZSock, chunk_size: usize, upload_slots: u32) -> Result<Server> {
+    pub fn new(router: ZSock, upload_slots: u32) -> Result<Server> {
         let router_rc = Rc::new(router);
         let arbitrator = try!(Arbitrator::new(router_rc.clone(), upload_slots));
 
         Ok(Server {
             router: router_rc,
             sink: try!(ZSock::new_pull("inproc://zfilexfer_sink")),
-            chunk_size: chunk_size,
             files: HashMap::new(),
             arbitrator: arbitrator,
         })
@@ -62,7 +60,7 @@ impl Endpoint for Server {
             if let Ok(action) = try!(try!(ZFrame::recv(sock)).data()) {
                 match action.as_ref() {
                     "NEW" => {
-                        let msg = try!(ZMsg::expect_recv(sock, 2, Some(2), false));
+                        let msg = try!(ZMsg::expect_recv(sock, 4, Some(4), false));
 
                         let path = match msg.popstr().unwrap() {
                             Ok(p) => p,
@@ -70,14 +68,27 @@ impl Endpoint for Server {
                         };
 
                         let size = match msg.popstr().unwrap() {
-                            Ok(s) => match s.parse::<usize>() {
+                            Ok(s) => match s.parse::<u64>() {
                                 Ok(u) => u,
                                 Err(_) => return self.reply_err(&router_id, Error::InvalidRequest),
                             },
                             Err(_) => return self.reply_err(&router_id, Error::InvalidRequest),
                         };
 
-                        let file = match File::create(&mut self.arbitrator, &router_id, &path, size, self.chunk_size) {
+                        let chunk_size = match msg.popstr().unwrap() {
+                            Ok(s) => match s.parse::<u64>() {
+                                Ok(u) => u,
+                                Err(_) => return self.reply_err(&router_id, Error::InvalidRequest),
+                            },
+                            Err(_) => return self.reply_err(&router_id, Error::InvalidRequest),
+                        };
+
+                        let options = match msg.popstr().unwrap() {
+                            Ok(s) => s,
+                            Err(_) => return self.reply_err(&router_id, Error::InvalidRequest),
+                        };
+
+                        let file = match File::create(&mut self.arbitrator, &router_id, &path, size, chunk_size, &options) {
                             Ok(f) => f,
                             Err(e) => return self.reply_err(&router_id, e),
                         };
@@ -92,7 +103,7 @@ impl Endpoint for Server {
                         let msg = try!(ZMsg::expect_recv(sock, 2, Some(2), false));
 
                         let index = match msg.popstr().unwrap() {
-                            Ok(s) => match s.parse::<usize>() {
+                            Ok(s) => match s.parse::<u64>() {
                                 Ok(u) => u,
                                 Err(_) => return self.reply_err(&router_id, Error::InvalidRequest),
                             },
@@ -118,7 +129,7 @@ impl Endpoint for Server {
 
             // We can make the assumption here that the data is well
             // formed, as there are no user-provided fields.
-            let index = msg.popstr().unwrap().unwrap().parse::<usize>().unwrap();
+            let index = msg.popstr().unwrap().unwrap().parse::<u64>().unwrap();
             let success = if msg.popstr().unwrap().unwrap() == "1" { true } else { false };
 
             let mut file = self.files.get_mut(&router_id).unwrap();
@@ -141,7 +152,7 @@ impl Endpoint for Server {
                 try!(msg.send(&*self.router));
             }
         } else {
-            unimplemented!();
+            unreachable!();
         }
 
         Ok(())
@@ -165,7 +176,7 @@ mod tests {
         ZSys::init();
 
         let router = ZSock::new(ZSockType::ROUTER);
-        assert!(Server::new(router, 1024, 0).is_ok());
+        assert!(Server::new(router, 0).is_ok());
     }
 
     #[test]
@@ -211,6 +222,8 @@ mod tests {
         msg.addstr("NEW").unwrap();
         msg.addstr("/path/to/file").unwrap();
         msg.addstr("abc").unwrap();
+        msg.addstr("1").unwrap();
+        msg.addstr("{}").unwrap();
         msg.send(&dealer).unwrap();
 
         server.recv(&router_dup).unwrap();
@@ -226,6 +239,8 @@ mod tests {
         msg.addstr("NEW").unwrap();
         msg.addstr(&format!("{}/testfile", tempdir.path().to_str().unwrap())).unwrap();
         msg.addstr("10240").unwrap();
+        msg.addstr("1024").unwrap();
+        msg.addstr("{}").unwrap();
         msg.send(&dealer).unwrap();
 
         server.recv(&router_dup).unwrap();
@@ -266,7 +281,7 @@ mod tests {
         assert_eq!(msg.popstr().unwrap().unwrap(), "Invalid request");
 
         let tempdir = TempDir::new("server_test_recv_chunk").unwrap();
-        let file = File::create(&mut server.arbitrator, "abc".as_bytes(), &format!("{}/testfile", tempdir.path().to_str().unwrap()), 0, 1).unwrap();
+        let file = File::create(&mut server.arbitrator, "abc".as_bytes(), &format!("{}/testfile", tempdir.path().to_str().unwrap()), 0, 1, "{}").unwrap();
         server.files.insert(router_id, file);
 
         let msg = ZMsg::new();
@@ -292,7 +307,7 @@ mod tests {
 
         let mut server = new_server(sink, false);
         let tempdir = TempDir::new("server_test_recv_chunk").unwrap();
-        let file = File::create(&mut server.arbitrator, "abc".as_bytes(), &format!("{}/testfile", tempdir.path().to_str().unwrap()), 1, 1).unwrap();
+        let file = File::create(&mut server.arbitrator, "abc".as_bytes(), &format!("{}/testfile", tempdir.path().to_str().unwrap()), 1, 1, "{}").unwrap();
         server.files.insert("abc".as_bytes().into(), file);
 
         let msg = ZMsg::new();
@@ -321,7 +336,6 @@ mod tests {
         Server {
             router: router_rc,
             sink: sink,
-            chunk_size: 1024,
             files: HashMap::new(),
             arbitrator: arbitrator,
         }

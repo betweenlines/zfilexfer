@@ -7,6 +7,7 @@
 // modified, or distributed except according to those terms.
 
 extern crate czmq;
+extern crate rustc_serialize;
 #[cfg(test)]
 extern crate tempdir;
 extern crate zdaemon;
@@ -17,5 +18,5 @@ mod error;
 mod file;
 mod server;
 
-pub use file::File;
+pub use file::{File, Options as FileOptions};
 pub use server::Server;

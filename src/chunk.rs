@@ -8,14 +8,14 @@
 
 use czmq::{ZMsg, ZSock};
 use error::{Error, Result};
-use std::fs::OpenOptions;
-use std::io::{Seek, SeekFrom, Write};
+use std::fs::{self, OpenOptions};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::thread::{JoinHandle, spawn};
 
 pub struct Chunk {
     path: PathBuf,
-    index: usize,
+    index: u64,
     join_handle: Option<JoinHandle<()>>,
 }
 
@@ -28,16 +28,7 @@ impl Drop for Chunk {
 }
 
 impl Chunk {
-    // pub fn open(path: &str, id: u64) -> Result<Chunk> {
-    //     // Check file path is valid
-    //
-    //     Ok(Chunk {
-    //         path: path.into(),
-    //         id: id,
-    //     })
-    // }
-
-    pub fn create<P: AsRef<Path>>(path: P, index: usize) -> Result<Chunk> {
+    pub fn new<P: AsRef<Path>>(path: P, index: u64) -> Result<Chunk> {
         let path = path.as_ref();
 
         if !path.exists() || !path.is_file() {
@@ -52,7 +43,7 @@ impl Chunk {
     }
 
     #[cfg(test)]
-    pub fn test_new<P: AsRef<Path>>(path: P, index: usize) -> Chunk {
+    pub fn test_new<P: AsRef<Path>>(path: P, index: u64) -> Chunk {
         Chunk {
             path: path.as_ref().to_owned(),
             index: index,
@@ -60,19 +51,38 @@ impl Chunk {
         }
     }
 
-    // pub fn send(&self, sock: &ZSock) -> Result<()> {
-    //     // Send chunk to sock
-    //     Ok(())
-    // }
+    pub fn send(&self, sock: &ZSock, chunk_size: u64, file_size: u64) -> Result<()> {
+        // XXX This should be in a separate thread
+        let start = chunk_size * self.index;
+        let buf_size = if (start + chunk_size) > file_size {
+            file_size - start
+        } else {
+            chunk_size
+        };
 
-    pub fn recv(&mut self, router_id: &[u8], data: Vec<u8>, chunk_size: usize) -> Result<()> {
+        let mut file = try!(fs::File::open(&self.path));
+        try!(file.seek(SeekFrom::Start(start)));
+
+        let mut buf = Vec::with_capacity(buf_size as usize);
+        unsafe { buf.set_len(buf_size as usize); }
+        try!(file.read_exact(&mut buf));
+
+        let msg = ZMsg::new();
+        try!(msg.addstr("CHUNK"));
+        try!(msg.addstr(&self.index.to_string()));
+        try!(msg.addbytes(&buf));
+        try!(msg.send(sock));
+        Ok(())
+    }
+
+    pub fn recv(&mut self, router_id: &[u8], data: Vec<u8>, chunk_size: u64) -> Result<()> {
         let sock = try!(ZSock::new_push(">inproc://zfilexfer_sink"));
         sock.set_sndtimeo(Some(1000));
 
         self.do_recv(router_id, data, chunk_size, sock)
     }
 
-    pub fn do_recv(&mut self, router_id: &[u8], data: Vec<u8>, chunk_size: usize, sock: ZSock) -> Result<()> {
+    pub fn do_recv(&mut self, router_id: &[u8], data: Vec<u8>, chunk_size: u64, sock: ZSock) -> Result<()> {
         if self.join_handle.is_some() {
             self.join_handle.take().unwrap().join().unwrap();
         }
@@ -101,7 +111,7 @@ impl Chunk {
         Ok(())
     }
 
-    pub fn get_index(&self) -> usize {
+    pub fn get_index(&self) -> u64 {
         self.index
     }
 }
@@ -109,34 +119,25 @@ impl Chunk {
 #[cfg(test)]
 mod tests {
     use czmq::{ZMsg, ZSys};
-    use std::fs::{File, OpenOptions};
-    use std::io::Read;
+    use std::fs::{self, OpenOptions};
+    use std::io::{Read, Write};
     use super::*;
     use tempdir::TempDir;
-
-    #[test]
-    fn test_create() {
-        assert!(Chunk::create("/fake/path", 0).is_err());
-
-        let tempdir = TempDir::new("chunk_test_create").unwrap();
-        let path = format!("{}/test", tempdir.path().to_str().unwrap());
-        File::create(&path).unwrap();
-
-        assert!(Chunk::create(&path, 0).is_ok());
-    }
 
     #[test]
     fn test_recv() {
         ZSys::init();
 
-        let tempdir = TempDir::new("chunk_test_create").unwrap();
+        assert!(Chunk::new("/fake/path", 0).is_err());
+
+        let tempdir = TempDir::new("chunk_test_create_recv").unwrap();
         let path = format!("{}/test", tempdir.path().to_str().unwrap());
 
         let mut fh = OpenOptions::new().create(true).read(true).write(true).open(&path).unwrap();
         fh.set_len(6).unwrap();
 
         let (thread, sink) = ZSys::create_pipe().unwrap();
-        let mut chunk = Chunk::create(&path, 1).unwrap();
+        let mut chunk = Chunk::new(&path, 1).unwrap();
         chunk.do_recv("abc".as_bytes(), "abc".as_bytes().to_vec(), 3, thread).unwrap();
 
         let msg = ZMsg::recv(&sink).unwrap();
@@ -147,5 +148,26 @@ mod tests {
         let mut content = Vec::new();
         fh.read_to_end(&mut content).unwrap();
         assert_eq!(content, vec![0, 0, 0, 97, 98, 99]);
+    }
+
+    #[test]
+    fn test_send() {
+        ZSys::init();
+
+        let tempdir = TempDir::new("chunk_test_create_recv").unwrap();
+        let path = format!("{}/test", tempdir.path().to_str().unwrap());
+
+        let mut fs_file = fs::File::create(&path).unwrap();
+        fs_file.write_all("abc".as_bytes()).unwrap();
+
+        let (client, server) = ZSys::create_pipe().unwrap();
+
+        let chunk = Chunk::new(&path, 0).unwrap();
+        chunk.send(&client, 2, 3).unwrap();
+
+        let msg = ZMsg::recv(&server).unwrap();
+        assert_eq!(&msg.popstr().unwrap().unwrap(), "CHUNK");
+        assert_eq!(&msg.popstr().unwrap().unwrap(), "0");
+        assert_eq!(&msg.popstr().unwrap().unwrap(), "ab");
     }
 }

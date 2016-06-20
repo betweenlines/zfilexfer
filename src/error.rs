@@ -7,6 +7,7 @@
 // modified, or distributed except according to those terms.
 
 use czmq;
+use rustc_serialize::json;
 use std::{convert, error, fmt, io, result, str};
 use zdaemon;
 
@@ -18,11 +19,16 @@ pub enum Error {
     ChunkIndex,
     Czmq(czmq::Error),
     FileFail,
+    InvalidFileOpts,
     InvalidFilePath,
+    InvalidReply,
     InvalidRequest,
     Io(io::Error),
+    JsonEncoder(json::EncoderError),
+    JsonDecoder(json::DecoderError),
     ModeRecv,
     ModeSend,
+    UploadError(String),
 }
 
 unsafe impl Send for Error {}
@@ -35,11 +41,16 @@ impl fmt::Display for Error {
             Error::ChunkIndex => write!(f, "Chunk index not in file"),
             Error::Czmq(ref e) => write!(f, "CZMQ error: {}", e),
             Error::FileFail => write!(f, "Failed to upload file"),
+            Error::InvalidFileOpts => write!(f, "Invalid file options"),
             Error::InvalidFilePath => write!(f, "Path does not exist or is not a file"),
+            Error::InvalidReply => write!(f, "Invalid reply"),
             Error::InvalidRequest => write!(f, "Invalid request"),
             Error::Io(ref e) => write!(f, "IO error: {}", e),
+            Error::JsonEncoder(ref e) => write!(f, "JSON encoder error: {}", e),
+            Error::JsonDecoder(ref e) => write!(f, "JSON decoder error: {}", e),
             Error::ModeRecv => write!(f, "Struct is in wrong mode for receiving"),
             Error::ModeSend => write!(f, "Struct is in wrong mode for sending"),
+            Error::UploadError(ref e) => write!(f, "Could not upload file: {}", e),
         }
     }
 }
@@ -51,11 +62,16 @@ impl error::Error for Error {
             Error::ChunkIndex => "Chunk index not in file",
             Error::Czmq(ref e) => e.description(),
             Error::FileFail => "Failed to upload file",
+            Error::InvalidFileOpts => "Invalid file options",
             Error::InvalidFilePath => "Path does not exist or is not a file",
+            Error::InvalidReply => "Invalid reply",
             Error::InvalidRequest => "Invalid request",
             Error::Io(ref e) => e.description(),
+            Error::JsonEncoder(ref e) => e.description(),
+            Error::JsonDecoder(ref e) => e.description(),
             Error::ModeRecv => "Struct is in wrong mode for receiving",
             Error::ModeSend => "Struct is in wrong mode for sending",
+            Error::UploadError(ref e) => e,
         }
     }
 }
@@ -69,6 +85,18 @@ impl convert::From<czmq::Error> for Error {
 impl convert::From<io::Error> for Error {
     fn from(err: io::Error) -> Error {
         Error::Io(err)
+    }
+}
+
+impl convert::From<json::EncoderError> for Error {
+    fn from(err: json::EncoderError) -> Error {
+        Error::JsonEncoder(err)
+    }
+}
+
+impl convert::From<json::DecoderError> for Error {
+    fn from(err: json::DecoderError) -> Error {
+        Error::JsonDecoder(err)
     }
 }
 

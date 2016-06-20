@@ -8,19 +8,24 @@
 
 use arbitrator::Arbitrator;
 use chunk::Chunk;
+use czmq::{ZMsg, ZSock};
 use error::{Error, Result};
+use rustc_serialize::json;
 use std::collections::HashMap;
-use std::fs::{create_dir_all, rename, self};
+use std::fs::{create_dir_all, metadata, rename, self};
 use std::path::{Path, PathBuf};
 
+const CHUNK_SIZE: u64 = 1024; // 1Kb
 const MAX_CHUNK_ERR: u8 = 5;
 
 pub struct File {
     path: PathBuf,
     upload_path: PathBuf,
-    chunks: HashMap<usize, Chunk>,
+    size: u64,
+    chunks: HashMap<u64, Chunk>,
     chunk_error_cnt: u8,
-    chunk_size: usize,
+    chunk_size: u64,
+    options: FileOptions,
 }
 
 impl File {
@@ -40,20 +45,46 @@ impl File {
     }
 
     /// Open a local file for sending
-    // pub fn open(path: &str) -> Result<File> {
-    //     // Check file path is valid
-    //     // Get file size
-    //     let size = 0;
-    //
-    //     Ok(File {
-    //         path: path.into(),
-    //         size: size,
-    //         chunks: HashMap::new(),
-    //     })
-    // }
+    pub fn open<P: AsRef<Path>>(path: P, options: Option<Vec<Options>>) -> Result<File> {
+        let path = path.as_ref();
+
+        // Check file exists
+        if !path.exists() || !path.is_file() {
+            return Err(Error::InvalidFilePath);
+        }
+
+        let meta = try!(path.metadata());
+
+        let mut file = File {
+            path: path.to_owned(),
+            upload_path: path.to_owned(),
+            size: meta.len(),
+            chunks: HashMap::new(),
+            chunk_error_cnt: 0,
+            chunk_size: CHUNK_SIZE,
+            options: FileOptions::new(options),
+        };
+
+        if let Some(size) = file.options.chunk_size {
+            file.chunk_size = size;
+        }
+
+        // Create chunks
+        let mut size_ctr = file.size as i64;
+        let mut index = 0;
+        while size_ctr > 0 {
+            let chunk = try!(Chunk::new(path, index));
+            file.chunks.insert(index, chunk);
+
+            index += 1;
+            size_ctr -= file.chunk_size as i64;
+        }
+
+        Ok(file)
+    }
 
     /// Create a new file container for receiving
-    pub fn create<P: AsRef<Path>>(arbitrator: &mut Arbitrator, router_id: &[u8], path: P, size: usize, chunk_size: usize) -> Result<File> {
+    pub fn create<P: AsRef<Path>>(arbitrator: &mut Arbitrator, router_id: &[u8], path: P, size: u64, chunk_size: u64, options: &str) -> Result<File> {
         let upload_path = Self::temporary_filename(path.as_ref());
 
         // Create file
@@ -63,50 +94,69 @@ impl File {
 
         // Split size into chunks and queue
         let mut chunks = HashMap::new();
-        let mut size_ctr = size;
+        let mut size_ctr = size as i64;
         let mut index = 0;
         while size_ctr > 0 {
-            let chunk = try!(Chunk::create(&upload_path, index));
+            let chunk = try!(Chunk::new(&upload_path, index));
             try!(arbitrator.queue(&chunk, router_id));
             chunks.insert(index, chunk);
 
             index += 1;
-            size_ctr -= chunk_size;
+            size_ctr -= chunk_size as i64;
         }
+
+        // Decode options
+        let options = try!(FileOptions::decode(options));
 
         Ok(File {
             path: path.as_ref().to_owned(),
             upload_path: upload_path,
+            size: size,
             chunks: chunks,
             chunk_error_cnt: 0,
             chunk_size: chunk_size,
+            options: options,
         })
     }
 
-    // pub fn send(&self, sock: &ZSock) -> Result<()> {
-    //     // if self.router_id.is_some() {
-    //     //     return Err(Error::ModeSend);
-    //     // }
-    //
-    //     loop {
-    //         // Send req to server
-    //         // Chunk file
-    //         // Listen for chunk req's and send
-    //         // Listen for OK/ERR
-    //         break;
-    //     }
-    //
-    //     Ok(())
-    // }
+    pub fn send(&self, sock: &ZSock) -> Result<()> {
+        let msg = ZMsg::new();
+        try!(msg.addstr("NEW"));
+        try!(msg.addstr(&self.path.to_str().unwrap()));
 
-    pub fn recv(&mut self, router_id: &[u8], index: usize, chunk_data: Vec<u8>) -> Result<()> {
+        let meta = try!(self.path.metadata());
+        try!(msg.addstr(&meta.len().to_string()));
+
+        try!(msg.addstr(&self.chunk_size.to_string()));
+        try!(msg.addstr(&try!(self.options.encode())));
+        try!(msg.send(sock));
+
+        loop {
+            let msg = try!(ZMsg::recv(sock));
+
+            match try!(msg.popstr().unwrap().or(Err(Error::InvalidReply))).as_ref() {
+                "Ok" => return Ok(()),
+                "Err" => return Err(Error::UploadError(msg.popstr().unwrap().unwrap())),
+                "CHUNK" => {
+                    let index = msg.popstr().unwrap().unwrap().parse::<u64>().unwrap();
+                    match self.chunks.get(&index) {
+                        Some(chunk) => try!(chunk.send(sock, self.chunk_size, self.size)),
+                        None => return Err(Error::ChunkIndex),
+                    }
+                },
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    pub fn recv(&mut self, router_id: &[u8], index: u64, chunk_data: Vec<u8>) -> Result<()> {
         let chunk = try!(self.chunks.get_mut(&index).ok_or(Error::ChunkIndex));
         try!(chunk.recv(router_id, chunk_data, self.chunk_size));
 
         Ok(())
     }
 
-    pub fn sink(&mut self, arbitrator: &mut Arbitrator, router_id: &[u8], index: usize, success: bool) -> Result<()> {
+    pub fn sink(&mut self, arbitrator: &mut Arbitrator, router_id: &[u8], index: u64, success: bool) -> Result<()> {
         if success {
             {
                 let chunk = try!(self.chunks.get_mut(&index).ok_or(Error::ChunkIndex));
@@ -132,19 +182,72 @@ impl File {
 
     pub fn save(&self) -> Result<()> {
         // XXX Check checksum
+
+        // Backup existing file
+        if self.options.backup_existing.is_some() && metadata(&self.path).is_ok() {
+            let suffix = self.options.backup_existing.as_ref().unwrap();
+            let file_name = self.path.file_name().unwrap().to_str().unwrap();
+            let mut backup_path = self.path.clone();
+            backup_path.set_file_name(&format!("{}{}", file_name, suffix));
+            try!(rename(&self.path, backup_path));
+        }
+
         try!(rename(&self.upload_path, &self.path));
         Ok(())
+    }
+}
+
+pub enum Options {
+    BackupExisting(String),
+    ChunkSize(u64),
+}
+
+#[derive(RustcDecodable, RustcEncodable)]
+struct FileOptions {
+    backup_existing: Option<String>,
+    chunk_size: Option<u64>,
+}
+
+impl FileOptions {
+    fn new(options: Option<Vec<Options>>) -> FileOptions {
+        let mut opts = FileOptions {
+            backup_existing: None,
+            chunk_size: None,
+        };
+
+        if let Some(options) = options {
+            for opt in options {
+                match opt {
+                    Options::BackupExisting(suffix) => opts.backup_existing = Some(suffix),
+                    Options::ChunkSize(size) => opts.chunk_size = Some(size),
+                }
+            }
+        }
+
+        opts
+    }
+
+    fn decode(encoded: &str) -> Result<FileOptions> {
+        let options = try!(json::decode(encoded));
+        Ok(options)
+    }
+
+    fn encode(&self) -> Result<String> {
+        Ok(try!(json::encode(&self)))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use arbitrator::Arbitrator;
-    use czmq::{ZSock, ZSockType, ZSys};
+    use czmq::{ZMsg, ZSock, ZSockType, ZSys};
     use std::fs;
+    use std::io::Write;
     use std::path::Path;
     use std::rc::Rc;
+    use std::thread::spawn;
     use super::*;
+    use super::FileOptions;
     use tempdir::TempDir;
 
     #[test]
@@ -159,20 +262,54 @@ mod tests {
     }
 
     #[test]
-    fn test_create() {
-        let tempdir = TempDir::new("file_test_new").unwrap();
+    fn test_create_recv() {
+        let tempdir = TempDir::new("file_test_new_recv").unwrap();
         let mut arbitrator = Arbitrator::new(Rc::new(ZSock::new(ZSockType::ROUTER)), 0).unwrap();
-        assert!(File::create(&mut arbitrator, "abc".as_bytes(), &format!("{}/testfile", tempdir.path().to_str().unwrap()), 0, 1).is_ok());
+        let mut file = File::create(&mut arbitrator, "abc".as_bytes(), &format!("{}/testfile", tempdir.path().to_str().unwrap()), 1, 1, "{}").unwrap();
+        assert!(file.recv(&Vec::new(), 0, Vec::new()).is_ok());
     }
 
     #[test]
-    fn test_recv() {
+    fn test_open_send() {
         ZSys::init();
 
-        let tempdir = TempDir::new("file_test_recv").unwrap();
-        let mut arbitrator = Arbitrator::new(Rc::new(ZSock::new(ZSockType::ROUTER)), 0).unwrap();
-        let mut file = File::create(&mut arbitrator, "abc".as_bytes(), &format!("{}/testfile", tempdir.path().to_str().unwrap()), 1, 1).unwrap();
-        assert!(file.recv(&Vec::new(), 0, Vec::new()).is_ok());
+        let tempdir = TempDir::new("file_test_new_recv").unwrap();
+        let path = format!("{}/file", tempdir.path().to_str().unwrap());
+        let path_clone = path.clone();
+        let mut fs_file = fs::File::create(&path).unwrap();
+        fs_file.write_all("abc".as_bytes()).unwrap();
+
+        let (client, server) = ZSys::create_pipe().unwrap();
+        client.set_rcvtimeo(Some(500));
+        server.set_rcvtimeo(Some(500));
+
+        let handle = spawn(move|| {
+            let msg = ZMsg::recv(&server).unwrap();
+            assert_eq!(&msg.popstr().unwrap().unwrap(), "NEW");
+            assert_eq!(&msg.popstr().unwrap().unwrap(), &path_clone);
+            assert_eq!(&msg.popstr().unwrap().unwrap(), "3");
+            assert_eq!(&msg.popstr().unwrap().unwrap(), "2");
+            assert_eq!(&msg.popstr().unwrap().unwrap(), "{\"backup_existing\":null,\"chunk_size\":2}");
+
+            let msg = ZMsg::new();
+            msg.addstr("CHUNK").unwrap();
+            msg.addstr("1").unwrap();
+            msg.send(&server).unwrap();
+
+            let msg = ZMsg::recv(&server).unwrap();
+            assert_eq!(&msg.popstr().unwrap().unwrap(), "CHUNK");
+            assert_eq!(&msg.popstr().unwrap().unwrap(), "1");
+            assert_eq!(&msg.popstr().unwrap().unwrap(), "c");
+
+            let msg = ZMsg::new();
+            msg.addstr("Ok").unwrap();
+            msg.send(&server).unwrap();
+        });
+
+        let file = File::open(&path, Some(vec![Options::ChunkSize(2)])).unwrap();
+        file.send(&client).unwrap();
+
+        handle.join().unwrap();
     }
 
     #[test]
@@ -181,7 +318,7 @@ mod tests {
 
         let tempdir = TempDir::new("file_test_recv").unwrap();
         let mut arbitrator = Arbitrator::new(Rc::new(ZSock::new(ZSockType::ROUTER)), 0).unwrap();
-        let mut file = File::create(&mut arbitrator, "abc".as_bytes(), &format!("{}/testfile", tempdir.path().to_str().unwrap()), 1, 1).unwrap();
+        let mut file = File::create(&mut arbitrator, "abc".as_bytes(), &format!("{}/testfile", tempdir.path().to_str().unwrap()), 1, 1, "{}").unwrap();
 
         for _ in 0..6 {
             file.sink(&mut arbitrator, "abc".as_bytes(), 0, false).unwrap();
@@ -203,12 +340,21 @@ mod tests {
         path.push("file");
 
         let mut arbitrator = Arbitrator::new(Rc::new(ZSock::new(ZSockType::ROUTER)), 0).unwrap();
-        let file = File::create(&mut arbitrator, "abc".as_bytes(), &path, 0, 1).unwrap();
+        let file = File::create(&mut arbitrator, "abc".as_bytes(), &path, 0, 1, "{}").unwrap();
 
         assert!(tmp_path.exists());
         assert!(!path.exists());
         assert!(file.save().is_ok());
         assert!(!tmp_path.exists());
         assert!(path.exists());
+    }
+
+    #[test]
+    fn test_file_options() {
+        let options = FileOptions::new(Some(vec![Options::BackupExisting("_moo".into()), Options::ChunkSize(123)]));
+        let encoded = options.encode().unwrap();
+        let decoded = FileOptions::decode(&encoded).unwrap();
+        assert_eq!(&decoded.backup_existing.unwrap(), "_moo");
+        assert_eq!(decoded.chunk_size.unwrap(), 123);
     }
 }
