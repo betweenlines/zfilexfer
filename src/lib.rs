@@ -19,5 +19,6 @@ mod error;
 mod file;
 mod server;
 
+pub use error::Error;
 pub use file::{File, Options as FileOptions};
 pub use server::Server;
