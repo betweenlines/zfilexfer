@@ -6,6 +6,7 @@
 // https://www.tldrlegal.com/l/mpl-2.0>. This file may not be copied,
 // modified, or distributed except according to those terms.
 
+extern crate crc;
 extern crate czmq;
 extern crate rustc_serialize;
 #[cfg(test)]

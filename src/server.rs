@@ -60,7 +60,7 @@ impl Endpoint for Server {
             if let Ok(action) = try!(try!(ZFrame::recv(sock)).data()) {
                 match action.as_ref() {
                     "NEW" => {
-                        let msg = try!(ZMsg::expect_recv(sock, 4, Some(4), false));
+                        let msg = try!(ZMsg::expect_recv(sock, 5, Some(5), false));
 
                         let path = match msg.popstr().unwrap() {
                             Ok(p) => p,
@@ -68,6 +68,14 @@ impl Endpoint for Server {
                         };
 
                         let size = match msg.popstr().unwrap() {
+                            Ok(s) => match s.parse::<u64>() {
+                                Ok(u) => u,
+                                Err(_) => return self.reply_err(&router_id, Error::InvalidRequest),
+                            },
+                            Err(_) => return self.reply_err(&router_id, Error::InvalidRequest),
+                        };
+
+                        let crc = match msg.popstr().unwrap() {
                             Ok(s) => match s.parse::<u64>() {
                                 Ok(u) => u,
                                 Err(_) => return self.reply_err(&router_id, Error::InvalidRequest),
@@ -88,7 +96,7 @@ impl Endpoint for Server {
                             Err(_) => return self.reply_err(&router_id, Error::InvalidRequest),
                         };
 
-                        let file = match File::create(&mut self.arbitrator, &router_id, &path, size, chunk_size, &options) {
+                        let file = match File::create(&mut self.arbitrator, &router_id, &path, size, crc, chunk_size, &options) {
                             Ok(f) => f,
                             Err(e) => return self.reply_err(&router_id, e),
                         };
@@ -222,6 +230,7 @@ mod tests {
         msg.addstr("NEW").unwrap();
         msg.addstr("/path/to/file").unwrap();
         msg.addstr("abc").unwrap();
+        msg.addstr("0").unwrap();
         msg.addstr("1").unwrap();
         msg.addstr("{}").unwrap();
         msg.send(&dealer).unwrap();
@@ -239,6 +248,7 @@ mod tests {
         msg.addstr("NEW").unwrap();
         msg.addstr(&format!("{}/testfile", tempdir.path().to_str().unwrap())).unwrap();
         msg.addstr("10240").unwrap();
+        msg.addstr("0").unwrap();
         msg.addstr("1024").unwrap();
         msg.addstr("{}").unwrap();
         msg.send(&dealer).unwrap();
@@ -281,7 +291,7 @@ mod tests {
         assert_eq!(msg.popstr().unwrap().unwrap(), "Invalid request");
 
         let tempdir = TempDir::new("server_test_recv_chunk").unwrap();
-        let file = File::create(&mut server.arbitrator, "abc".as_bytes(), &format!("{}/testfile", tempdir.path().to_str().unwrap()), 0, 1, "{}").unwrap();
+        let file = File::create(&mut server.arbitrator, "abc".as_bytes(), &format!("{}/testfile", tempdir.path().to_str().unwrap()), 0, 0, 1, "{}").unwrap();
         server.files.insert(router_id, file);
 
         let msg = ZMsg::new();
@@ -307,7 +317,7 @@ mod tests {
 
         let mut server = new_server(sink, false);
         let tempdir = TempDir::new("server_test_recv_chunk").unwrap();
-        let file = File::create(&mut server.arbitrator, "abc".as_bytes(), &format!("{}/testfile", tempdir.path().to_str().unwrap()), 1, 1, "{}").unwrap();
+        let file = File::create(&mut server.arbitrator, "abc".as_bytes(), &format!("{}/testfile", tempdir.path().to_str().unwrap()), 1, 0, 1, "{}").unwrap();
         server.files.insert("abc".as_bytes().into(), file);
 
         let msg = ZMsg::new();
