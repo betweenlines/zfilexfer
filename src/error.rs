@@ -105,3 +105,48 @@ impl convert::Into<zdaemon::Error> for Error {
         zdaemon::Error::Generic(Box::new(self))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use czmq::{ZSock, ZSockType, ZSys};
+    use rustc_serialize::json::{DecoderError, EncoderError};
+    use std::fs::metadata;
+    use super::*;
+    use zdaemon;
+
+    #[test]
+    fn test_convert_czmq() {
+        ZSys::init();
+
+        let sock = ZSock::new(ZSockType::REQ);
+        let e = sock.recv_str().unwrap_err();
+        Error::from(e);
+    }
+
+    #[test]
+    fn test_convert_io() {
+        if let Err(e) = metadata("/fake/path") {
+            Error::from(e);
+        } else {
+            unreachable!();
+        }
+    }
+
+    #[test]
+    fn test_convert_json_encode() {
+        let e = EncoderError::BadHashmapKey;
+        Error::from(e);
+    }
+
+    #[test]
+    fn test_convert_json_decode() {
+        let e = DecoderError::EOF;
+        Error::from(e);
+    }
+
+    #[test]
+    fn test_convert_zdaemon() {
+        let e = Error::ChunkFail;
+        let _: zdaemon::Error = e.into();
+    }
+}
