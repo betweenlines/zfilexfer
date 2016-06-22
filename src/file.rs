@@ -60,7 +60,7 @@ impl File {
     }
 
     /// Open a local file for sending
-    pub fn open<P: AsRef<Path>>(path: P, options: Option<Vec<Options>>) -> Result<File> {
+    pub fn open<P: AsRef<Path>>(path: P, options: Option<&[Options]>) -> Result<File> {
         let path = path.as_ref();
 
         // Check file exists
@@ -227,7 +227,7 @@ struct FileOptions {
 }
 
 impl FileOptions {
-    fn new(options: Option<Vec<Options>>) -> FileOptions {
+    fn new(options: Option<&[Options]>) -> FileOptions {
         let mut opts = FileOptions {
             backup_existing: None,
             chunk_size: None,
@@ -236,8 +236,8 @@ impl FileOptions {
         if let Some(options) = options {
             for opt in options {
                 match opt {
-                    Options::BackupExisting(suffix) => opts.backup_existing = Some(suffix),
-                    Options::ChunkSize(size) => opts.chunk_size = Some(size),
+                    &Options::BackupExisting(ref suffix) => opts.backup_existing = Some(suffix.to_string()),
+                    &Options::ChunkSize(size) => opts.chunk_size = Some(size),
                 }
             }
         }
@@ -338,7 +338,7 @@ mod tests {
             msg.send(&server).unwrap();
         });
 
-        let file = File::open(&local_path, Some(vec![Options::ChunkSize(2)])).unwrap();
+        let file = File::open(&local_path, Some(&[Options::ChunkSize(2)])).unwrap();
         file.send(&client, &remote_path).unwrap();
 
         handle.join().unwrap();
@@ -383,7 +383,7 @@ mod tests {
 
     #[test]
     fn test_file_options() {
-        let options = FileOptions::new(Some(vec![Options::BackupExisting("_moo".into()), Options::ChunkSize(123)]));
+        let options = FileOptions::new(Some(&[Options::BackupExisting("_moo".into()), Options::ChunkSize(123)]));
         let encoded = options.encode().unwrap();
         let decoded = FileOptions::decode(&encoded).unwrap();
         assert_eq!(&decoded.backup_existing.unwrap(), "_moo");
