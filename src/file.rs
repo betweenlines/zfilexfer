@@ -136,10 +136,10 @@ impl File {
         })
     }
 
-    pub fn send(&self, sock: &ZSock) -> Result<()> {
+    pub fn send<P: AsRef<Path>>(&self, sock: &ZSock, remote_path: P) -> Result<()> {
         let msg = ZMsg::new();
         try!(msg.addstr("NEW"));
-        try!(msg.addstr(&self.path.to_str().unwrap()));
+        try!(msg.addstr(remote_path.as_ref().to_str().unwrap()));
         let meta = try!(self.path.metadata());
         try!(msg.addstr(&meta.len().to_string()));
         try!(msg.addstr(&self.crc.to_string()));
@@ -304,9 +304,10 @@ mod tests {
         ZSys::init();
 
         let tempdir = TempDir::new("file_test_new_recv").unwrap();
-        let path = format!("{}/file", tempdir.path().to_str().unwrap());
-        let path_clone = path.clone();
-        let mut fs_file = fs::File::create(&path).unwrap();
+        let local_path = format!("{}/local_file.txt", tempdir.path().to_str().unwrap());
+        let remote_path = format!("{}/remote_file.txt", tempdir.path().to_str().unwrap());
+        let remote_path_clone = remote_path.clone();
+        let mut fs_file = fs::File::create(&local_path).unwrap();
         fs_file.write_all("abc".as_bytes()).unwrap();
 
         let (client, server) = ZSys::create_pipe().unwrap();
@@ -316,7 +317,7 @@ mod tests {
         let handle = spawn(move|| {
             let msg = ZMsg::recv(&server).unwrap();
             assert_eq!(&msg.popstr().unwrap().unwrap(), "NEW");
-            assert_eq!(&msg.popstr().unwrap().unwrap(), &path_clone);
+            assert_eq!(&msg.popstr().unwrap().unwrap(), &remote_path_clone);
             assert_eq!(&msg.popstr().unwrap().unwrap(), "3");
             assert_eq!(&msg.popstr().unwrap().unwrap(), "5336943202215289992");
             assert_eq!(&msg.popstr().unwrap().unwrap(), "2");
@@ -337,8 +338,8 @@ mod tests {
             msg.send(&server).unwrap();
         });
 
-        let file = File::open(&path, Some(vec![Options::ChunkSize(2)])).unwrap();
-        file.send(&client).unwrap();
+        let file = File::open(&local_path, Some(vec![Options::ChunkSize(2)])).unwrap();
+        file.send(&client, &remote_path).unwrap();
 
         handle.join().unwrap();
     }

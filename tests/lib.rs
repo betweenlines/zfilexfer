@@ -47,7 +47,7 @@ fn upload() {
     fs_file.write_all("abcdefghijklmnopqrstuvwxyz".as_bytes()).unwrap();
 
     let file = File::open(&path, Some(vec![FileOptions::BackupExisting(".bk".into()), FileOptions::ChunkSize(5)])).unwrap();
-    file.send(&client).unwrap();
+    file.send(&client, &path).unwrap();
 
     assert!(fs::metadata(&path).is_ok());
     let mut buf = PathBuf::from(&path);
