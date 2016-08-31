@@ -29,7 +29,9 @@ pub struct Arbitrator {
 
 impl Drop for Arbitrator {
     fn drop(&mut self) {
-        self.timer_comm.signal(0).unwrap();
+        // Ignore failure as it means the thread has already
+        // terminated.
+        let _ = self.timer_comm.signal(0);
         if self.timer_handle.is_some() {
             self.timer_handle.take().unwrap().join().unwrap();
         }
@@ -133,8 +135,8 @@ impl Timer {
 
     fn run(self) {
         loop {
-            // Terminate on signal
-            if self.comm.wait().is_ok() {
+            // Terminate on ZSock signal or system signal (SIGTERM)
+            if self.comm.wait().is_ok() || ZSys::is_interrupted() {
                 break;
             }
 
