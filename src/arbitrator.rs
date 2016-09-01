@@ -42,7 +42,9 @@ impl Arbitrator {
     pub fn new(router: Rc<ZSock>, upload_slots: u32) -> Result<Arbitrator> {
         let (comm_front, comm_back) = try!(ZSys::create_pipe());
         comm_front.set_sndtimeo(Some(1000));
+        comm_front.set_linger(0);
         comm_back.set_rcvtimeo(Some(1000)); // Remember that this timeout controls the Timer loop speed!
+        comm_back.set_linger(0);
 
         let lock = Arc::new(RwLock::new(Vec::new()));
         let timer = try!(Timer::new(comm_back, lock.clone()));
