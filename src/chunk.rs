@@ -51,7 +51,7 @@ impl Chunk {
         }
     }
 
-    pub fn send(&self, sock: &ZSock, chunk_size: u64, file_size: u64) -> Result<()> {
+    pub fn send(&self, sock: &mut ZSock, chunk_size: u64, file_size: u64) -> Result<()> {
         // XXX This should be in a separate thread
         let start = chunk_size * self.index;
         let buf_size = if (start + chunk_size) > file_size {
@@ -90,6 +90,7 @@ impl Chunk {
         let path = self.path.clone();
         let chunk_index = self.index.clone();
         let router_id = router_id.to_vec();
+        let mut sock = sock;
 
         self.join_handle = Some(spawn(move|| {
             let result = || -> Result<()> {
@@ -105,7 +106,7 @@ impl Chunk {
             msg.addbytes(&router_id).unwrap();
             msg.addstr(&chunk_index.to_string()).unwrap();
             msg.addstr(if result.is_ok() { "1" } else { "0" }).unwrap();
-            msg.send(&sock).unwrap();
+            msg.send(&mut sock).unwrap();
         }));
 
         Ok(())
@@ -136,11 +137,11 @@ mod tests {
         let mut fh = OpenOptions::new().create(true).read(true).write(true).open(&path).unwrap();
         fh.set_len(6).unwrap();
 
-        let (thread, sink) = ZSys::create_pipe().unwrap();
+        let (thread, mut sink) = ZSys::create_pipe().unwrap();
         let mut chunk = Chunk::new(&path, 1).unwrap();
         chunk.do_recv("abc".as_bytes(), "abc".as_bytes().to_vec(), 3, thread).unwrap();
 
-        let msg = ZMsg::recv(&sink).unwrap();
+        let msg = ZMsg::recv(&mut sink).unwrap();
         let _ = msg.popstr();
         let _ = msg.popstr();
         assert_eq!(msg.popstr().unwrap().unwrap(), "1");
@@ -160,12 +161,12 @@ mod tests {
         let mut fs_file = fs::File::create(&path).unwrap();
         fs_file.write_all("abc".as_bytes()).unwrap();
 
-        let (client, server) = ZSys::create_pipe().unwrap();
+        let (mut client, mut server) = ZSys::create_pipe().unwrap();
 
         let chunk = Chunk::new(&path, 0).unwrap();
-        chunk.send(&client, 2, 3).unwrap();
+        chunk.send(&mut client, 2, 3).unwrap();
 
-        let msg = ZMsg::recv(&server).unwrap();
+        let msg = ZMsg::recv(&mut server).unwrap();
         assert_eq!(&msg.popstr().unwrap().unwrap(), "CHUNK");
         assert_eq!(&msg.popstr().unwrap().unwrap(), "0");
         assert_eq!(&msg.popstr().unwrap().unwrap(), "ab");

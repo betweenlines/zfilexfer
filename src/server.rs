@@ -38,20 +38,20 @@ impl Server {
         })
     }
 
-    fn reply_err(&self, router_id: &[u8], err: Error) -> StdResult<(), DError> {
+    fn reply_err(&mut self, router_id: &[u8], err: Error) -> StdResult<(), DError> {
         let msg = try!(ZMsg::new_err(&err.into()));
         try!(msg.pushbytes(router_id));
-        try!(msg.send(&self.router));
+        try!(msg.send(&mut self.router));
         Ok(())
     }
 }
 
 impl Endpoint for Server {
-    fn get_sockets(&self) -> Vec<&ZSock> {
-        vec![&self.router, &self.sink, &self.arbitrator_sock]
+    fn get_sockets(&mut self) -> Vec<&mut ZSock> {
+        vec![&mut self.router, &mut self.sink, &mut self.arbitrator_sock]
     }
 
-    fn recv(&mut self, sock: &ZSock) -> StdResult<(), DError> {
+    fn recv(&mut self, sock: &mut ZSock) -> StdResult<(), DError> {
         // We always expect a router ID as it ties a request to a
         // file. Its presence is not dependent on the socket type.
         let router_id = match try!(try!(ZFrame::recv(sock)).data()) {
@@ -152,7 +152,7 @@ impl Endpoint for Server {
             if file.is_error() {
                 try!(ZMsg::new_err(&Error::FileFail.into()));
                 try!(msg.pushbytes(&router_id));
-                try!(msg.send(&self.router));
+                try!(msg.send(&mut self.router));
             }
             else if file.is_complete() {
                 let msg = match file.save() {
@@ -160,14 +160,14 @@ impl Endpoint for Server {
                     Err(e) => try!(ZMsg::new_err(&e.into())),
                 };
                 try!(msg.pushbytes(&router_id));
-                try!(msg.send(&self.router));
+                try!(msg.send(&mut self.router));
             }
         }
         else if *sock == self.arbitrator_sock {
             // Forward messages from Arbitrator to Router sock
             let msg = try!(ZMsg::recv(sock));
             try!(msg.pushbytes(&router_id));
-            try!(msg.send(&self.router));
+            try!(msg.send(&mut self.router));
         } else {
             unreachable!();
         }
@@ -199,24 +199,24 @@ mod tests {
     fn test_reply_err() {
         ZSys::init();
 
-        let dealer = ZSock::new_dealer("inproc://server_test_reply_err").unwrap();
+        let mut dealer = ZSock::new_dealer("inproc://server_test_reply_err").unwrap();
         dealer.set_sndtimeo(Some(500));
         dealer.set_rcvtimeo(Some(500));
-        let router = ZSock::new_router("inproc://server_test_reply_err").unwrap();
+        let mut router = ZSock::new_router("inproc://server_test_reply_err").unwrap();
         router.set_sndtimeo(Some(500));
         router.set_rcvtimeo(Some(500));
 
         dealer.send_str("moo").unwrap();
-        let router_id = match ZFrame::recv(&router).unwrap().data().unwrap() {
+        let router_id = match ZFrame::recv(&mut router).unwrap().data().unwrap() {
             Ok(s) => s.into_bytes(),
             Err(b) => b,
         };
         router.flush();
 
-        let server = new_server(router, true);
+        let mut server = new_server(router, true);
         assert!(server.reply_err(&router_id, Error::InvalidRequest).is_ok());
 
-        let reply = ZFrame::recv(&dealer).unwrap().data().unwrap().unwrap();
+        let reply = ZFrame::recv(&mut dealer).unwrap().data().unwrap().unwrap();
         assert_eq!(&reply, "Err");
     }
 
@@ -224,13 +224,13 @@ mod tests {
     fn test_recv_new() {
         ZSys::init();
 
-        let dealer = ZSock::new_dealer("inproc://server_test_recv_new").unwrap();
+        let mut dealer = ZSock::new_dealer("inproc://server_test_recv_new").unwrap();
         dealer.set_sndtimeo(Some(500));
         dealer.set_rcvtimeo(Some(500));
-        let router = ZSock::new_router("inproc://server_test_recv_new").unwrap();
+        let mut router = ZSock::new_router("inproc://server_test_recv_new").unwrap();
         router.set_sndtimeo(Some(500));
         router.set_rcvtimeo(Some(500));
-        let router_dup = ZSock::from_raw(router.borrow_raw(), false);
+        let mut router_dup = unsafe { ZSock::from_raw(router.as_mut_ptr(), false) };
 
         let mut server = new_server(router, true);
 
@@ -241,12 +241,12 @@ mod tests {
         msg.addstr("0").unwrap();
         msg.addstr("1").unwrap();
         msg.addstr("{}").unwrap();
-        msg.send(&dealer).unwrap();
+        msg.send(&mut dealer).unwrap();
 
-        server.recv(&router_dup).unwrap();
+        server.recv(&mut router_dup).unwrap();
         assert_eq!(server.files.len(), 0);
 
-        let msg = ZMsg::recv(&dealer).unwrap();
+        let msg = ZMsg::recv(&mut dealer).unwrap();
         assert_eq!(msg.popstr().unwrap().unwrap(), "Err");
         assert_eq!(msg.popstr().unwrap().unwrap(), "Invalid request");
 
@@ -259,9 +259,9 @@ mod tests {
         msg.addstr("0").unwrap();
         msg.addstr("1024").unwrap();
         msg.addstr("{}").unwrap();
-        msg.send(&dealer).unwrap();
+        msg.send(&mut dealer).unwrap();
 
-        server.recv(&router_dup).unwrap();
+        server.recv(&mut router_dup).unwrap();
         assert_eq!(server.files.len(), 1);
 
         assert!(dealer.recv_str().is_err());
@@ -271,16 +271,16 @@ mod tests {
     fn test_recv_chunk() {
         ZSys::init();
 
-        let dealer = ZSock::new_dealer("inproc://server_test_recv_chunk").unwrap();
+        let mut dealer = ZSock::new_dealer("inproc://server_test_recv_chunk").unwrap();
         dealer.set_sndtimeo(Some(500));
         dealer.set_rcvtimeo(Some(500));
-        let router = ZSock::new_router("inproc://server_test_recv_chunk").unwrap();
+        let mut router = ZSock::new_router("inproc://server_test_recv_chunk").unwrap();
         router.set_sndtimeo(Some(500));
         router.set_rcvtimeo(Some(500));
-        let router_dup = ZSock::from_raw(router.borrow_raw(), false);
+        let mut router_dup = unsafe { ZSock::from_raw(router.as_mut_ptr(), false) };
 
         dealer.send_str("test").unwrap();
-        let router_id = match ZFrame::recv(&router).unwrap().data().unwrap() {
+        let router_id = match ZFrame::recv(&mut router).unwrap().data().unwrap() {
             Ok(s) => s.into_bytes(),
             Err(b) => b,
         };
@@ -290,11 +290,11 @@ mod tests {
 
         let msg = ZMsg::new();
         msg.addstr("CHUNK").unwrap();
-        msg.send(&dealer).unwrap();
+        msg.send(&mut dealer).unwrap();
 
-        server.recv(&router_dup).unwrap();
+        server.recv(&mut router_dup).unwrap();
 
-        let msg = ZMsg::recv(&dealer).unwrap();
+        let msg = ZMsg::recv(&mut dealer).unwrap();
         assert_eq!(msg.popstr().unwrap().unwrap(), "Err");
         assert_eq!(msg.popstr().unwrap().unwrap(), "Invalid request");
 
@@ -306,11 +306,11 @@ mod tests {
         msg.addstr("CHUNK").unwrap();
         msg.addstr("1").unwrap();
         msg.addbytes("bytes".as_bytes()).unwrap();
-        msg.send(&dealer).unwrap();
+        msg.send(&mut dealer).unwrap();
 
-        server.recv(&router_dup).unwrap();
+        server.recv(&mut router_dup).unwrap();
 
-        let msg = ZMsg::recv(&dealer).unwrap();
+        let msg = ZMsg::recv(&mut dealer).unwrap();
         assert_eq!(msg.popstr().unwrap().unwrap(), "Err");
         assert_eq!(msg.popstr().unwrap().unwrap(), "Chunk index not in file");
     }
@@ -319,9 +319,9 @@ mod tests {
     fn test_recv_sink() {
         ZSys::init();
 
-        let worker = ZSock::new_push("inproc://server_test_recv_sink").unwrap();
-        let sink = ZSock::new_pull("inproc://server_test_recv_sink").unwrap();
-        let sink_dup = ZSock::from_raw(sink.borrow_raw(), false);
+        let mut worker = ZSock::new_push("inproc://server_test_recv_sink").unwrap();
+        let mut sink = ZSock::new_pull("inproc://server_test_recv_sink").unwrap();
+        let mut sink_dup = unsafe { ZSock::from_raw(sink.as_mut_ptr(), false) };
 
         let mut server = new_server(sink, false);
         let tempdir = TempDir::new("server_test_recv_chunk").unwrap();
@@ -332,9 +332,9 @@ mod tests {
         msg.addstr("abc").unwrap();
         msg.addstr("0").unwrap();
         msg.addstr("1").unwrap();
-        msg.send(&worker).unwrap();
+        msg.send(&mut worker).unwrap();
 
-        assert!(server.recv(&sink_dup).is_ok());
+        assert!(server.recv(&mut sink_dup).is_ok());
     }
 
     fn new_server(sock: ZSock, is_router: bool) -> Server {

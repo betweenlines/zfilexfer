@@ -109,7 +109,7 @@ impl Arbitrator {
                 try!(msg.addbytes(&chunk.router_id));
                 try!(msg.addstr("CHUNK"));
                 try!(msg.addstr(&chunk.index.to_string()));
-                try!(msg.send(&self.router));
+                try!(msg.send(&mut self.router));
 
                 chunk.start();
             }
@@ -134,7 +134,7 @@ impl Timer {
         })
     }
 
-    fn run(self) {
+    fn run(mut self) {
         loop {
             // Terminate on ZSock signal or system signal (SIGTERM)
             if self.comm.wait().is_ok() || ZSys::is_interrupted() {
@@ -147,7 +147,7 @@ impl Timer {
                     msg.addbytes(&chunk.router_id).unwrap();
                     msg.addstr(&chunk.index.to_string()).unwrap();
                     msg.addstr("0").unwrap();
-                    msg.send(&self.sink).unwrap();
+                    msg.send(&mut self.sink).unwrap();
                 }
             }
         }
@@ -222,7 +222,7 @@ mod tests {
     fn test_arbitrator_request() {
         ZSys::init();
 
-        let (client, router) = ZSys::create_pipe().unwrap();
+        let (mut client, router) = ZSys::create_pipe().unwrap();
         client.set_rcvtimeo(Some(500));
 
         let (comm, thread) = ZSys::create_pipe().unwrap();
@@ -248,7 +248,7 @@ mod tests {
             arbitrator.request().unwrap();
 
             for x in 0..3 {
-                let msg = ZMsg::recv(&client).unwrap();
+                let msg = ZMsg::recv(&mut client).unwrap();
                 assert_eq!(&msg.popstr().unwrap().unwrap(), "abc");
                 assert_eq!(&msg.popstr().unwrap().unwrap(), "CHUNK");
                 assert_eq!(msg.popstr().unwrap().unwrap(), x.to_string());
@@ -260,7 +260,7 @@ mod tests {
             arbitrator.release(&chunk, "abc".as_bytes()).unwrap();
             arbitrator.request().unwrap();
 
-            let msg = ZMsg::recv(&client).unwrap();
+            let msg = ZMsg::recv(&mut client).unwrap();
             assert_eq!(&msg.popstr().unwrap().unwrap(), "def");
             assert_eq!(&msg.popstr().unwrap().unwrap(), "CHUNK");
             assert_eq!(msg.popstr().unwrap().unwrap(), "0");
@@ -280,7 +280,7 @@ mod tests {
     fn test_timer_run() {
         ZSys::init();
 
-        let (client, server) = ZSys::create_pipe().unwrap();
+        let (mut client, server) = ZSys::create_pipe().unwrap();
         let (comm, thread) = ZSys::create_pipe().unwrap();
         client.set_rcvtimeo(Some(1500));
         thread.set_rcvtimeo(Some(1000));
@@ -297,7 +297,7 @@ mod tests {
         };
         let handle = spawn(|| timer.run());
 
-        let msg = ZMsg::recv(&client).unwrap();
+        let msg = ZMsg::recv(&mut client).unwrap();
         assert_eq!(msg.popstr().unwrap().unwrap(), "abc");
         assert_eq!(msg.popstr().unwrap().unwrap(), "0");
         assert_eq!(msg.popstr().unwrap().unwrap(), "0");

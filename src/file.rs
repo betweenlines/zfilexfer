@@ -136,7 +136,7 @@ impl File {
         })
     }
 
-    pub fn send<P: AsRef<Path>>(&self, sock: &ZSock, remote_path: P) -> Result<()> {
+    pub fn send<P: AsRef<Path>>(&self, sock: &mut ZSock, remote_path: P) -> Result<()> {
         let msg = ZMsg::new();
         try!(msg.addstr("NEW"));
         try!(msg.addstr(remote_path.as_ref().to_str().unwrap()));
@@ -309,12 +309,12 @@ mod tests {
         let mut fs_file = fs::File::create(&local_path).unwrap();
         fs_file.write_all("abc".as_bytes()).unwrap();
 
-        let (client, server) = ZSys::create_pipe().unwrap();
+        let (mut client, mut server) = ZSys::create_pipe().unwrap();
         client.set_rcvtimeo(Some(500));
         server.set_rcvtimeo(Some(500));
 
         let handle = spawn(move|| {
-            let msg = ZMsg::recv(&server).unwrap();
+            let msg = ZMsg::recv(&mut server).unwrap();
             assert_eq!(&msg.popstr().unwrap().unwrap(), "NEW");
             assert_eq!(&msg.popstr().unwrap().unwrap(), &remote_path_clone);
             assert_eq!(&msg.popstr().unwrap().unwrap(), "3");
@@ -325,20 +325,20 @@ mod tests {
             let msg = ZMsg::new();
             msg.addstr("CHUNK").unwrap();
             msg.addstr("1").unwrap();
-            msg.send(&server).unwrap();
+            msg.send(&mut server).unwrap();
 
-            let msg = ZMsg::recv(&server).unwrap();
+            let msg = ZMsg::recv(&mut server).unwrap();
             assert_eq!(&msg.popstr().unwrap().unwrap(), "CHUNK");
             assert_eq!(&msg.popstr().unwrap().unwrap(), "1");
             assert_eq!(&msg.popstr().unwrap().unwrap(), "c");
 
             let msg = ZMsg::new();
             msg.addstr("Ok").unwrap();
-            msg.send(&server).unwrap();
+            msg.send(&mut server).unwrap();
         });
 
         let file = File::open(&local_path, Some(&[Options::ChunkSize(2)])).unwrap();
-        file.send(&client, &remote_path).unwrap();
+        file.send(&mut client, &remote_path).unwrap();
 
         handle.join().unwrap();
     }

@@ -27,7 +27,7 @@ fn upload() {
 
     let server = ZSock::new_router("@inproc://test_upload").unwrap();
     server.set_rcvtimeo(Some(500));
-    let client = ZSock::new_dealer(">inproc://test_upload").unwrap();
+    let mut client = ZSock::new_dealer(">inproc://test_upload").unwrap();
     client.set_rcvtimeo(Some(500));
 
     let handle = spawn(move|| {
@@ -42,7 +42,7 @@ fn upload() {
     fs_file.write_all("abcdefghijklmnopqrstuvwxyz".as_bytes()).unwrap();
 
     let file = File::open(&path, Some(&[FileOptions::BackupExisting(".bk".into()), FileOptions::ChunkSize(5)])).unwrap();
-    file.send(&client, &path).unwrap();
+    file.send(&mut client, &path).unwrap();
 
     assert!(fs::metadata(&path).is_ok());
     let mut buf = PathBuf::from(&path);
