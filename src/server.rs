@@ -7,45 +7,48 @@
 // modified, or distributed except according to those terms.
 
 use arbitrator::Arbitrator;
-use czmq::{ZFrame, ZMsg, ZSock};
+use czmq::{ZFrame, ZMsg, ZSock, ZSys};
 use error::{Error, Result};
 use file::File;
 use std::collections::HashMap;
 use std::result::Result as StdResult;
-use std::rc::Rc;
 use zdaemon::{Endpoint, Error as DError, ZMsgExtended};
 
 pub struct Server {
-    router: Rc<ZSock>,
+    router: ZSock,
     sink: ZSock,
     files: HashMap<Vec<u8>, File>,
     arbitrator: Arbitrator,
+    arbitrator_sock: ZSock,
 }
 
 impl Server {
     pub fn new(router: ZSock, upload_slots: u32) -> Result<Server> {
-        let router_rc = Rc::new(router);
-        let arbitrator = try!(Arbitrator::new(router_rc.clone(), upload_slots));
+        // Would use RC instead of pipe, however RC !Send and Arc
+        // +Sync & ZSock !Sync.
+        let (s_sock, a_sock) = try!(ZSys::create_pipe());
+        let arbitrator = try!(Arbitrator::new(a_sock, upload_slots));
 
         Ok(Server {
-            router: router_rc,
+            router: router,
             sink: try!(ZSock::new_pull("inproc://zfilexfer_sink")),
             files: HashMap::new(),
             arbitrator: arbitrator,
+            arbitrator_sock: s_sock,
         })
     }
 
     fn reply_err(&self, router_id: &[u8], err: Error) -> StdResult<(), DError> {
         let msg = try!(ZMsg::new_err(&err.into()));
         try!(msg.pushbytes(router_id));
-        try!(msg.send(&*self.router));
+        try!(msg.send(&self.router));
         Ok(())
     }
 }
 
 impl Endpoint for Server {
     fn get_sockets(&self) -> Vec<&ZSock> {
-        vec![&self.router, &self.sink]
+        vec![&self.router, &self.sink, &self.arbitrator_sock]
     }
 
     fn recv(&mut self, sock: &ZSock) -> StdResult<(), DError> {
@@ -56,7 +59,7 @@ impl Endpoint for Server {
             Err(b) => b,
         };
 
-        if *sock == *self.router {
+        if *sock == self.router {
             if let Ok(action) = try!(try!(ZFrame::recv(sock)).data()) {
                 match action.as_ref() {
                     "NEW" => {
@@ -149,7 +152,7 @@ impl Endpoint for Server {
             if file.is_error() {
                 try!(ZMsg::new_err(&Error::FileFail.into()));
                 try!(msg.pushbytes(&router_id));
-                try!(msg.send(&*self.router));
+                try!(msg.send(&self.router));
             }
             else if file.is_complete() {
                 let msg = match file.save() {
@@ -157,8 +160,14 @@ impl Endpoint for Server {
                     Err(e) => try!(ZMsg::new_err(&e.into())),
                 };
                 try!(msg.pushbytes(&router_id));
-                try!(msg.send(&*self.router));
+                try!(msg.send(&self.router));
             }
+        }
+        else if *sock == self.arbitrator_sock {
+            // Forward messages from Arbitrator to Router sock
+            let msg = try!(ZMsg::recv(sock));
+            try!(msg.pushbytes(&router_id));
+            try!(msg.send(&self.router));
         } else {
             unreachable!();
         }
@@ -174,7 +183,6 @@ mod tests {
     use error::Error;
     use file::File;
     use std::collections::HashMap;
-    use std::rc::Rc;
     use super::*;
     use tempdir::TempDir;
     use zdaemon::Endpoint;
@@ -340,14 +348,15 @@ mod tests {
             sink = sock;
         }
 
-        let router_rc = Rc::new(router);
-        let arbitrator = Arbitrator::new(router_rc.clone(), 0).unwrap();
+        let (s_sock, a_sock) = ZSys::create_pipe().unwrap();
+        let arbitrator = Arbitrator::new(a_sock, 0).unwrap();
 
         Server {
-            router: router_rc,
+            router: router,
             sink: sink,
             files: HashMap::new(),
             arbitrator: arbitrator,
+            arbitrator_sock: s_sock,
         }
     }
 }

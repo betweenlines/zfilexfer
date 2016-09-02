@@ -18,12 +18,8 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::thread::spawn;
 use tempdir::TempDir;
-use zdaemon::{ConfigFile, Service};
+use zdaemon::Service;
 use zfilexfer::{File, FileOptions, Server};
-
-#[derive(RustcDecodable, RustcEncodable)]
-struct Config;
-impl ConfigFile for Config {}
 
 #[test]
 fn upload() {
@@ -35,10 +31,9 @@ fn upload() {
     client.set_rcvtimeo(Some(500));
 
     let handle = spawn(move|| {
-        let server = Server::new(server, 2).unwrap();
-        let mut service: Service<Config> = Service::new().unwrap();
-        service.add_endpoint(server).unwrap();
-        let _ = service.start(Some(500)); // Give this a timeout so that the test can finish!
+        let mut service = Service::new().unwrap();
+        service.add_endpoint(Server::new(server, 2).unwrap()).unwrap();
+        let _ = service.start(false, Some(500)); // Give this a timeout so that the test can finish!
     });
 
     let tempdir = TempDir::new("file_test_new_recv").unwrap();

@@ -9,7 +9,6 @@
 use chunk::Chunk;
 use czmq::{ZMsg, ZSock, ZSys};
 use error::{Error, Result};
-use std::rc::Rc;
 use std::sync::{Arc, RwLock};
 use std::thread::{JoinHandle, spawn};
 use std::time::Instant;
@@ -20,7 +19,7 @@ const CHUNK_TIMEOUT: u64 = 60;
 const CHUNK_TIMEOUT: u64 = 1;
 
 pub struct Arbitrator {
-    router: Rc<ZSock>,
+    router: ZSock,
     queue: Arc<RwLock<Vec<TimedChunk>>>,
     timer_handle: Option<JoinHandle<()>>,
     timer_comm: ZSock,
@@ -39,7 +38,7 @@ impl Drop for Arbitrator {
 }
 
 impl Arbitrator {
-    pub fn new(router: Rc<ZSock>, upload_slots: u32) -> Result<Arbitrator> {
+    pub fn new(router: ZSock, upload_slots: u32) -> Result<Arbitrator> {
         let (comm_front, comm_back) = try!(ZSys::create_pipe());
         comm_front.set_sndtimeo(Some(1000));
         comm_front.set_linger(0);
@@ -110,7 +109,7 @@ impl Arbitrator {
                 try!(msg.addbytes(&chunk.router_id));
                 try!(msg.addstr("CHUNK"));
                 try!(msg.addstr(&chunk.index.to_string()));
-                try!(msg.send(&*self.router));
+                try!(msg.send(&self.router));
 
                 chunk.start();
             }
@@ -191,7 +190,6 @@ impl TimedChunk {
 mod tests {
     use chunk::Chunk;
     use czmq::{ZMsg, ZSock, ZSockType, ZSys};
-    use std::rc::Rc;
     use std::sync::{Arc, RwLock};
     use std::thread::{sleep, spawn};
     use std::time::{Duration, Instant};
@@ -202,7 +200,7 @@ mod tests {
     fn test_arbitrator_new() {
         ZSys::init();
 
-        assert!(Arbitrator::new(Rc::new(ZSock::new(ZSockType::ROUTER)), 0).is_ok());
+        assert!(Arbitrator::new(ZSock::new(ZSockType::PAIR), 0).is_ok());
     }
 
     #[test]
@@ -211,7 +209,7 @@ mod tests {
 
         let chunk = Chunk::test_new("/path/to/file", 0);
 
-        let mut arbitrator = Arbitrator::new(Rc::new(ZSock::new(ZSockType::ROUTER)), 1).unwrap();
+        let mut arbitrator = Arbitrator::new(ZSock::new(ZSockType::ROUTER), 1).unwrap();
         assert!(arbitrator.queue(&chunk, "abc".as_bytes()).is_ok());
         assert_eq!(arbitrator.queue.read().unwrap().len(), 1);
         assert_eq!(arbitrator.slots, 0);
@@ -240,7 +238,7 @@ mod tests {
 
         {
             let mut arbitrator = Arbitrator {
-                router: Rc::new(router),
+                router: router,
                 queue: Arc::new(RwLock::new(chunks)),
                 timer_handle: None,
                 timer_comm: comm,
