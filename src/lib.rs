@@ -11,6 +11,8 @@ extern crate czmq;
 extern crate rustc_serialize;
 #[cfg(test)]
 extern crate tempdir;
+#[cfg(test)]
+extern crate tempfile;
 extern crate zdaemon;
 
 mod arbitrator;

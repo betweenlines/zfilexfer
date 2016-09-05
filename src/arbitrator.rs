@@ -190,11 +190,14 @@ impl TimedChunk {
 mod tests {
     use chunk::Chunk;
     use czmq::{ZMsg, ZSock, ZSockType, ZSys};
+    use std::cell::RefCell;
+    use std::rc::Rc;
     use std::sync::{Arc, RwLock};
     use std::thread::{sleep, spawn};
     use std::time::{Duration, Instant};
     use super::*;
     use super::{TimedChunk, Timer};
+    use tempfile::tempfile;
 
     #[test]
     fn test_arbitrator_new() {
@@ -207,7 +210,7 @@ mod tests {
     fn test_arbitrator_queue_release() {
         ZSys::init();
 
-        let chunk = Chunk::test_new("/path/to/file", 0);
+        let chunk = Chunk::new(Rc::new(RefCell::new(tempfile().unwrap())), 0);
 
         let mut arbitrator = Arbitrator::new(ZSock::new(ZSockType::ROUTER), 1).unwrap();
         assert!(arbitrator.queue(&chunk, "abc".as_bytes()).is_ok());
@@ -256,7 +259,7 @@ mod tests {
 
             assert!(client.recv_str().is_err());
 
-            let chunk = Chunk::test_new("/path/to/file", 0);
+            let chunk = Chunk::new(Rc::new(RefCell::new(tempfile().unwrap())), 0);
             arbitrator.release(&chunk, "abc".as_bytes()).unwrap();
             arbitrator.request().unwrap();
 

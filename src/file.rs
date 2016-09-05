@@ -12,17 +12,20 @@ use crc::{crc64, Hasher64};
 use czmq::{ZMsg, ZSock};
 use error::{Error, Result};
 use rustc_serialize::json;
+use std::cell::{RefMut, RefCell};
 use std::collections::HashMap;
-use std::fs::{create_dir_all, metadata, rename, self};
-use std::io::Read;
+use std::fs::{create_dir_all, rename, self};
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 const CHUNK_SIZE: u64 = 1024; // 1Kb
 const MAX_CHUNK_ERR: u8 = 5;
 
 pub struct File {
-    path: PathBuf,
-    upload_path: PathBuf,
+    fh: Rc<RefCell<fs::File>>,
+    path: Option<PathBuf>,
+    upload_path: Option<PathBuf>,
     size: u64,
     crc: u64,
     chunks: HashMap<u64, Chunk>,
@@ -47,12 +50,12 @@ impl File {
         }
     }
 
-    fn calc_crc<P: AsRef<Path>>(path: P) -> Result<u64> {
-        let mut file = try!(fs::File::open(path));
+    fn calc_crc(mut fh: RefMut<fs::File>) -> Result<u64> {
         let mut buf = [0; 1024];
         let mut digest = crc64::Digest::new(crc64::ECMA);
 
-        while try!(file.read(&mut buf)) > 0 {
+        try!(fh.seek(SeekFrom::Start(0)));
+        while try!(fh.read(&mut buf)) > 0 {
             digest.write(&buf);
         }
 
@@ -61,20 +64,27 @@ impl File {
 
     /// Open a local file for sending
     pub fn open<P: AsRef<Path>>(path: P, options: Option<&[Options]>) -> Result<File> {
-        let path = path.as_ref();
-
         // Check file exists
-        if !path.exists() || !path.is_file() {
+        if !path.as_ref().exists() || !path.as_ref().is_file() {
             return Err(Error::InvalidFilePath);
         }
 
-        let meta = try!(path.metadata());
+        let fh = try!(fs::File::open(&path));
+        Self::open_file(fh, options)
+    }
+
+    /// Wrap a local file for sending
+    pub fn open_file(fh: fs::File, options: Option<&[Options]>) -> Result<File> {
+        let meta = try!(fh.metadata());
+        let fh = Rc::new(RefCell::new(fh));
+        let crc = try!(Self::calc_crc(fh.borrow_mut()));
 
         let mut file = File {
-            path: path.to_owned(),
-            upload_path: path.to_owned(),
+            fh: fh.clone(),
+            path: None,
+            upload_path: None,
             size: meta.len(),
-            crc: try!(Self::calc_crc(path)),
+            crc: crc,
             chunks: HashMap::new(),
             chunk_error_cnt: 0,
             chunk_size: CHUNK_SIZE,
@@ -89,7 +99,7 @@ impl File {
         let mut size_ctr = file.size as i64;
         let mut index = 0;
         while size_ctr > 0 {
-            let chunk = try!(Chunk::new(path, index));
+            let chunk = Chunk::new(fh.clone(), index);
             file.chunks.insert(index, chunk);
 
             index += 1;
@@ -99,21 +109,44 @@ impl File {
         Ok(file)
     }
 
-    /// Create a new file container for receiving
-    pub fn create<P: AsRef<Path>>(arbitrator: &mut Arbitrator, router_id: &[u8], path: P, size: u64, crc: u64, chunk_size: u64, options: &str) -> Result<File> {
+    /// Create a new file container from path for receiving
+    pub fn create<P: AsRef<Path>>(arbitrator: &mut Arbitrator,
+                                  router_id: &[u8],
+                                  path: P,
+                                  size: u64,
+                                  crc: u64,
+                                  chunk_size: u64,
+                                  options: &str) -> Result<File> {
+
         let upload_path = Self::temporary_filename(path.as_ref());
 
         // Create file
         try!(create_dir_all(path.as_ref().parent().unwrap()));
-        let f = try!(fs::File::create(&upload_path));
-        try!(f.set_len(size as u64));
+        let fh = try!(fs::OpenOptions::new().create(true).read(true).write(true).open(&upload_path));
+        try!(fh.set_len(size as u64));
+
+        Self::create_file(arbitrator, router_id, fh, &upload_path, path, size, crc, chunk_size, options)
+    }
+
+    /// Create a new file container for receiving
+    pub fn create_file<P: AsRef<Path>, Q: AsRef<Path>>(arbitrator: &mut Arbitrator,
+                                                       router_id: &[u8],
+                                                       fh: fs::File,
+                                                       fh_path: P,
+                                                       path: Q,
+                                                       size: u64,
+                                                       crc: u64,
+                                                       chunk_size: u64,
+                                                       options: &str) -> Result<File> {
+
+        let fh = Rc::new(RefCell::new(fh));
 
         // Split size into chunks and queue
         let mut chunks = HashMap::new();
         let mut size_ctr = size as i64;
         let mut index = 0;
         while size_ctr > 0 {
-            let chunk = try!(Chunk::new(&upload_path, index));
+            let chunk = Chunk::new(fh.clone(), index);
             try!(arbitrator.queue(&chunk, router_id));
             chunks.insert(index, chunk);
 
@@ -125,8 +158,9 @@ impl File {
         let options = try!(FileOptions::decode(options));
 
         Ok(File {
-            path: path.as_ref().to_owned(),
-            upload_path: upload_path,
+            fh: fh,
+            path: Some(path.as_ref().to_owned()),
+            upload_path: Some(fh_path.as_ref().to_owned()),
             size: size,
             crc: crc,
             chunks: chunks,
@@ -136,11 +170,11 @@ impl File {
         })
     }
 
-    pub fn send<P: AsRef<Path>>(&self, sock: &mut ZSock, remote_path: P) -> Result<()> {
+    pub fn send<P: AsRef<Path>>(&mut self, sock: &mut ZSock, remote_path: P) -> Result<()> {
         let msg = ZMsg::new();
         try!(msg.addstr("NEW"));
         try!(msg.addstr(remote_path.as_ref().to_str().unwrap()));
-        let meta = try!(self.path.metadata());
+        let meta = try!(self.fh.borrow().metadata());
         try!(msg.addstr(&meta.len().to_string()));
         try!(msg.addstr(&self.crc.to_string()));
         try!(msg.addstr(&self.chunk_size.to_string()));
@@ -155,7 +189,7 @@ impl File {
                 "Err" => return Err(Error::UploadError(msg.popstr().unwrap().unwrap())),
                 "CHUNK" => {
                     let index = msg.popstr().unwrap().unwrap().parse::<u64>().unwrap();
-                    match self.chunks.get(&index) {
+                    match self.chunks.get_mut(&index) {
                         Some(chunk) => try!(chunk.send(sock, self.chunk_size, self.size)),
                         None => return Err(Error::ChunkIndex),
                     }
@@ -197,20 +231,23 @@ impl File {
     }
 
     pub fn save(&self) -> Result<()> {
-        if self.crc != try!(Self::calc_crc(&self.upload_path)) {
+        if self.crc != try!(Self::calc_crc(self.fh.borrow_mut())) {
             return Err(Error::FailChecksum);
         }
 
+        let path = self.path.as_ref().unwrap();
+        let upload_path = self.upload_path.as_ref().unwrap();
+
         // Backup existing file
-        if self.options.backup_existing.is_some() && metadata(&self.path).is_ok() {
+        if self.options.backup_existing.is_some() && self.fh.borrow().metadata().is_ok() {
             let suffix = self.options.backup_existing.as_ref().unwrap();
-            let file_name = self.path.file_name().unwrap().to_str().unwrap();
-            let mut backup_path = self.path.clone();
+            let file_name = path.file_name().unwrap().to_str().unwrap();
+            let mut backup_path = path.clone();
             backup_path.set_file_name(&format!("{}{}", file_name, suffix));
-            try!(rename(&self.path, backup_path));
+            try!(rename(path, backup_path));
         }
 
-        try!(rename(&self.upload_path, &self.path));
+        try!(rename(upload_path, path));
         Ok(())
     }
 }
@@ -259,6 +296,7 @@ impl FileOptions {
 mod tests {
     use arbitrator::Arbitrator;
     use czmq::{ZMsg, ZSock, ZSockType, ZSys};
+    use std::cell::RefCell;
     use std::fs;
     use std::io::Write;
     use std::path::Path;
@@ -280,14 +318,13 @@ mod tests {
 
     #[test]
     fn test_calc_crc() {
-        assert!(File::calc_crc("/fake/path").is_err());
-
         let tempdir = TempDir::new("file_test_temporary_filename").unwrap();
         let path = format!("{}/.file0", tempdir.path().to_str().unwrap());
-        let mut file = fs::File::create(&path).unwrap();
+        let fh = RefCell::new(fs::OpenOptions::new().create(true).read(true).write(true).open(&path).unwrap());
+        let mut file = fh.borrow_mut();
         file.write_all(b"12345").unwrap();
 
-        assert_eq!(File::calc_crc(&path).unwrap(), 16742651521893322043);
+        assert_eq!(File::calc_crc(file).unwrap(), 16742651521893322043);
     }
 
     #[test]
@@ -337,7 +374,7 @@ mod tests {
             msg.send(&mut server).unwrap();
         });
 
-        let file = File::open(&local_path, Some(&[Options::ChunkSize(2)])).unwrap();
+        let mut file = File::open(&local_path, Some(&[Options::ChunkSize(2)])).unwrap();
         file.send(&mut client, &remote_path).unwrap();
 
         handle.join().unwrap();

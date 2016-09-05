@@ -7,52 +7,26 @@
 // modified, or distributed except according to those terms.
 
 use czmq::{ZMsg, ZSock};
-use error::{Error, Result};
-use std::fs::{self, OpenOptions};
+use error::Result;
+use std::cell::RefCell;
+use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::{Path, PathBuf};
-use std::thread::{JoinHandle, spawn};
+use std::rc::Rc;
 
 pub struct Chunk {
-    path: PathBuf,
+    fh: Rc<RefCell<fs::File>>,
     index: u64,
-    join_handle: Option<JoinHandle<()>>,
-}
-
-impl Drop for Chunk {
-    fn drop(&mut self) {
-        if self.join_handle.is_some() {
-            self.join_handle.take().unwrap().join().unwrap();
-        }
-    }
 }
 
 impl Chunk {
-    pub fn new<P: AsRef<Path>>(path: P, index: u64) -> Result<Chunk> {
-        let path = path.as_ref();
-
-        if !path.exists() || !path.is_file() {
-            return Err(Error::InvalidFilePath);
-        }
-
-        Ok(Chunk {
-            path: path.to_owned(),
-            index: index,
-            join_handle: None,
-        })
-    }
-
-    #[cfg(test)]
-    pub fn test_new<P: AsRef<Path>>(path: P, index: u64) -> Chunk {
+    pub fn new(file: Rc<RefCell<fs::File>>, index: u64) -> Chunk {
         Chunk {
-            path: path.as_ref().to_owned(),
+            fh: file,
             index: index,
-            join_handle: None
         }
     }
 
-    pub fn send(&self, sock: &mut ZSock, chunk_size: u64, file_size: u64) -> Result<()> {
-        // XXX This should be in a separate thread
+    pub fn send(&mut self, sock: &mut ZSock, chunk_size: u64, file_size: u64) -> Result<()> {
         let start = chunk_size * self.index;
         let buf_size = if (start + chunk_size) > file_size {
             file_size - start
@@ -60,12 +34,12 @@ impl Chunk {
             chunk_size
         };
 
-        let mut file = try!(fs::File::open(&self.path));
-        try!(file.seek(SeekFrom::Start(start)));
+        let mut fh = self.fh.borrow_mut();
+        try!(fh.seek(SeekFrom::Start(start)));
 
         let mut buf = Vec::with_capacity(buf_size as usize);
         unsafe { buf.set_len(buf_size as usize); }
-        try!(file.read_exact(&mut buf));
+        try!(fh.read_exact(&mut buf));
 
         let msg = ZMsg::new();
         try!(msg.addstr("CHUNK"));
@@ -82,32 +56,19 @@ impl Chunk {
         self.do_recv(router_id, data, chunk_size, sock)
     }
 
-    pub fn do_recv(&mut self, router_id: &[u8], data: Vec<u8>, chunk_size: u64, sock: ZSock) -> Result<()> {
-        if self.join_handle.is_some() {
-            self.join_handle.take().unwrap().join().unwrap();
-        }
+    pub fn do_recv(&mut self, router_id: &[u8], data: Vec<u8>, chunk_size: u64, mut sock: ZSock) -> Result<()> {
+        let result = || -> Result<()> {
+            let mut fh = self.fh.borrow_mut();
+            try!(fh.seek(SeekFrom::Start((self.index * chunk_size) as u64)));
+            try!(fh.write_all(&data));
+            Ok(())
+        }();
 
-        let path = self.path.clone();
-        let chunk_index = self.index.clone();
-        let router_id = router_id.to_vec();
-        let mut sock = sock;
-
-        self.join_handle = Some(spawn(move|| {
-            let result = || -> Result<()> {
-                let mut file = try!(OpenOptions::new().write(true).create(false).open(&path));
-                try!(file.seek(SeekFrom::Start((chunk_index * chunk_size) as u64)));
-                try!(file.write_all(&data));
-                Ok(())
-            }();
-
-            // If we can't send a message, it isn't recoverable by
-            // the application, so panicking is appropriate.
-            let msg = ZMsg::new();
-            msg.addbytes(&router_id).unwrap();
-            msg.addstr(&chunk_index.to_string()).unwrap();
-            msg.addstr(if result.is_ok() { "1" } else { "0" }).unwrap();
-            msg.send(&mut sock).unwrap();
-        }));
+        let msg = ZMsg::new();
+        try!(msg.addbytes(router_id));
+        try!(msg.addstr(&self.index.to_string()));
+        try!(msg.addstr(if result.is_ok() { "1" } else { "0" }));
+        try!(msg.send(&mut sock));
 
         Ok(())
     }
@@ -120,8 +81,10 @@ impl Chunk {
 #[cfg(test)]
 mod tests {
     use czmq::{ZMsg, ZSys};
-    use std::fs::{self, OpenOptions};
-    use std::io::{Read, Write};
+    use std::cell::RefCell;
+    use std::fs::OpenOptions;
+    use std::io::{Read, Seek, SeekFrom, Write};
+    use std::rc::Rc;
     use super::*;
     use tempdir::TempDir;
 
@@ -129,16 +92,14 @@ mod tests {
     fn test_recv() {
         ZSys::init();
 
-        assert!(Chunk::new("/fake/path", 0).is_err());
-
         let tempdir = TempDir::new("chunk_test_create_recv").unwrap();
         let path = format!("{}/test", tempdir.path().to_str().unwrap());
 
-        let mut fh = OpenOptions::new().create(true).read(true).write(true).open(&path).unwrap();
-        fh.set_len(6).unwrap();
+        let fh = Rc::new(RefCell::new(OpenOptions::new().create(true).read(true).write(true).open(&path).unwrap()));
+        fh.borrow().set_len(6).unwrap();
 
         let (thread, mut sink) = ZSys::create_pipe().unwrap();
-        let mut chunk = Chunk::new(&path, 1).unwrap();
+        let mut chunk = Chunk::new(fh.clone(), 1);
         chunk.do_recv("abc".as_bytes(), "abc".as_bytes().to_vec(), 3, thread).unwrap();
 
         let msg = ZMsg::recv(&mut sink).unwrap();
@@ -147,7 +108,8 @@ mod tests {
         assert_eq!(msg.popstr().unwrap().unwrap(), "1");
 
         let mut content = Vec::new();
-        fh.read_to_end(&mut content).unwrap();
+        fh.borrow_mut().seek(SeekFrom::Start(0)).unwrap();
+        fh.borrow_mut().read_to_end(&mut content).unwrap();
         assert_eq!(content, vec![0, 0, 0, 97, 98, 99]);
     }
 
@@ -158,12 +120,12 @@ mod tests {
         let tempdir = TempDir::new("chunk_test_create_recv").unwrap();
         let path = format!("{}/test", tempdir.path().to_str().unwrap());
 
-        let mut fs_file = fs::File::create(&path).unwrap();
-        fs_file.write_all("abc".as_bytes()).unwrap();
+        let mut fh = OpenOptions::new().read(true).write(true).create(true).open(&path).unwrap();
+        fh.write_all("abc".as_bytes()).unwrap();
 
         let (mut client, mut server) = ZSys::create_pipe().unwrap();
 
-        let chunk = Chunk::new(&path, 0).unwrap();
+        let mut chunk = Chunk::new(Rc::new(RefCell::new(fh)), 0);
         chunk.send(&mut client, 2, 3).unwrap();
 
         let msg = ZMsg::recv(&mut server).unwrap();
