@@ -31,8 +31,8 @@ impl Drop for Arbitrator {
         // Ignore failure as it means the thread has already
         // terminated.
         let _ = self.timer_comm.signal(0);
-        if self.timer_handle.is_some() {
-            self.timer_handle.take().unwrap().join().unwrap();
+        if let Some(h) = self.timer_handle.take() {
+            h.join().unwrap();
         }
     }
 }
