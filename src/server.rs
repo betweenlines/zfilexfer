@@ -39,7 +39,7 @@ impl Server {
     }
 
     fn reply_err(&mut self, router_id: &[u8], err: Error) -> StdResult<(), DError> {
-        let msg = try!(ZMsg::new_err(&err.into()));
+        let msg = try!(ZMsg::new_err(&err.into(), None));
         try!(msg.pushbytes(router_id));
         try!(msg.send(&mut self.router));
         Ok(())
@@ -150,14 +150,14 @@ impl Endpoint for Server {
             }
 
             if file.is_error() {
-                try!(ZMsg::new_err(&Error::FileFail.into()));
+                try!(ZMsg::new_err(&Error::FileFail.into(), None));
                 try!(msg.pushbytes(&router_id));
                 try!(msg.send(&mut self.router));
             }
             else if file.is_complete() {
                 let msg = match file.save() {
-                    Ok(_) => try!(ZMsg::new_ok()),
-                    Err(e) => try!(ZMsg::new_err(&e.into())),
+                    Ok(_) => try!(ZMsg::new_ok(None)),
+                    Err(e) => try!(ZMsg::new_err(&e.into(), None)),
                 };
                 try!(msg.pushbytes(&router_id));
                 try!(msg.send(&mut self.router));
@@ -179,7 +179,7 @@ impl Endpoint for Server {
 #[cfg(test)]
 mod tests {
     use arbitrator::Arbitrator;
-    use czmq::{RawInterface, ZFrame, ZMsg, ZSock, ZSockType, ZSys};
+    use czmq::{RawInterface, ZFrame, ZMsg, ZSock, SocketType, ZSys};
     use error::Error;
     use file::File;
     use std::collections::HashMap;
@@ -191,7 +191,7 @@ mod tests {
     fn test_new() {
         ZSys::init();
 
-        let router = ZSock::new(ZSockType::ROUTER);
+        let router = ZSock::new(SocketType::ROUTER);
         assert!(Server::new(router, 0).is_ok());
     }
 
@@ -342,9 +342,9 @@ mod tests {
         let sink;
         if is_router {
             router = sock;
-            sink = ZSock::new(ZSockType::PULL);
+            sink = ZSock::new(SocketType::PULL);
         } else {
-            router = ZSock::new(ZSockType::ROUTER);
+            router = ZSock::new(SocketType::ROUTER);
             sink = sock;
         }
 

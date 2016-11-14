@@ -12,7 +12,7 @@ extern crate tempdir;
 extern crate zdaemon;
 extern crate zfilexfer;
 
-use czmq::{ZSock, ZSockType, ZSys};
+use czmq::{ZSock, SocketType, ZSys};
 use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::thread::spawn;
@@ -30,7 +30,7 @@ fn upload() {
     client.set_rcvtimeo(Some(500));
 
     let handle = spawn(move|| {
-        let mut service = Service::new(ZSock::new(ZSockType::PAIR)).unwrap();
+        let mut service = Service::new(ZSock::new(SocketType::PAIR)).unwrap();
         service.add_endpoint(Server::new(server, 2).unwrap()).unwrap();
         let _ = service.start(Some(500)); // Give this a timeout so that the test can finish!
     });

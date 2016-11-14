@@ -295,7 +295,7 @@ impl FileOptions {
 #[cfg(test)]
 mod tests {
     use arbitrator::Arbitrator;
-    use czmq::{ZMsg, ZSock, ZSockType, ZSys};
+    use czmq::{ZMsg, ZSock, SocketType, ZSys};
     use std::cell::RefCell;
     use std::fs;
     use std::io::Write;
@@ -330,7 +330,7 @@ mod tests {
     #[test]
     fn test_create_recv() {
         let tempdir = TempDir::new("file_test_new_recv").unwrap();
-        let mut arbitrator = Arbitrator::new(ZSock::new(ZSockType::ROUTER), 0).unwrap();
+        let mut arbitrator = Arbitrator::new(ZSock::new(SocketType::ROUTER), 0).unwrap();
         let mut file = File::create(&mut arbitrator, "abc".as_bytes(), &format!("{}/testfile", tempdir.path().to_str().unwrap()), 1, 0, 1, "{}").unwrap();
         assert!(file.recv(&Vec::new(), 0, Vec::new()).is_ok());
     }
@@ -385,7 +385,7 @@ mod tests {
         ZSys::init();
 
         let tempdir = TempDir::new("file_test_recv").unwrap();
-        let mut arbitrator = Arbitrator::new(ZSock::new(ZSockType::ROUTER), 0).unwrap();
+        let mut arbitrator = Arbitrator::new(ZSock::new(SocketType::ROUTER), 0).unwrap();
         let mut file = File::create(&mut arbitrator, "abc".as_bytes(), &format!("{}/testfile", tempdir.path().to_str().unwrap()), 1, 0, 1, "{}").unwrap();
 
         for _ in 0..6 {
@@ -407,7 +407,7 @@ mod tests {
         let mut path = tempdir.path().to_path_buf();
         path.push("file");
 
-        let mut arbitrator = Arbitrator::new(ZSock::new(ZSockType::ROUTER), 0).unwrap();
+        let mut arbitrator = Arbitrator::new(ZSock::new(SocketType::ROUTER), 0).unwrap();
         let file = File::create(&mut arbitrator, "abc".as_bytes(), &path, 0, 0, 1, "{}").unwrap();
 
         assert!(tmp_path.exists());

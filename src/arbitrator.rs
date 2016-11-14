@@ -189,7 +189,7 @@ impl TimedChunk {
 #[cfg(test)]
 mod tests {
     use chunk::Chunk;
-    use czmq::{ZMsg, ZSock, ZSockType, ZSys};
+    use czmq::{ZMsg, ZSock, SocketType, ZSys};
     use std::cell::RefCell;
     use std::rc::Rc;
     use std::sync::{Arc, RwLock};
@@ -203,7 +203,7 @@ mod tests {
     fn test_arbitrator_new() {
         ZSys::init();
 
-        assert!(Arbitrator::new(ZSock::new(ZSockType::PAIR), 0).is_ok());
+        assert!(Arbitrator::new(ZSock::new(SocketType::PAIR), 0).is_ok());
     }
 
     #[test]
@@ -212,7 +212,7 @@ mod tests {
 
         let chunk = Chunk::new(Rc::new(RefCell::new(tempfile().unwrap())), 0);
 
-        let mut arbitrator = Arbitrator::new(ZSock::new(ZSockType::ROUTER), 1).unwrap();
+        let mut arbitrator = Arbitrator::new(ZSock::new(SocketType::ROUTER), 1).unwrap();
         assert!(arbitrator.queue(&chunk, "abc".as_bytes()).is_ok());
         assert_eq!(arbitrator.queue.read().unwrap().len(), 1);
         assert_eq!(arbitrator.slots, 0);
@@ -276,7 +276,7 @@ mod tests {
     fn test_timer_new() {
         ZSys::init();
 
-        assert!(Timer::new(ZSock::new(ZSockType::REQ), Arc::new(RwLock::new(Vec::new()))).is_ok());
+        assert!(Timer::new(ZSock::new(SocketType::REQ), Arc::new(RwLock::new(Vec::new()))).is_ok());
     }
 
     #[test]

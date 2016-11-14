@@ -111,7 +111,7 @@ impl convert::Into<zdaemon::Error> for Error {
 
 #[cfg(test)]
 mod tests {
-    use czmq::{ZSock, ZSockType, ZSys};
+    use czmq::{ZSock, SocketType, ZSys};
     use rustc_serialize::json::{DecoderError, EncoderError};
     use std::fs::metadata;
     use super::*;
@@ -121,7 +121,7 @@ mod tests {
     fn test_convert_czmq() {
         ZSys::init();
 
-        let sock = ZSock::new(ZSockType::REQ);
+        let sock = ZSock::new(SocketType::REQ);
         let e = sock.recv_str().unwrap_err();
         Error::from(e);
     }
