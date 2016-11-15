@@ -39,7 +39,7 @@ impl Server {
     }
 
     fn reply_err(&mut self, router_id: &[u8], err: Error) -> StdResult<(), DError> {
-        let msg = try!(ZMsg::new_err(&err.into(), None));
+        let msg = try!(ZMsg::new_err(&err.into()));
         try!(msg.pushbytes(router_id));
         try!(msg.send(&mut self.router));
         Ok(())
@@ -150,14 +150,14 @@ impl Endpoint for Server {
             }
 
             if file.is_error() {
-                try!(ZMsg::new_err(&Error::FileFail.into(), None));
+                try!(ZMsg::new_err(&Error::FileFail.into()));
                 try!(msg.pushbytes(&router_id));
                 try!(msg.send(&mut self.router));
             }
             else if file.is_complete() {
                 let msg = match file.save() {
-                    Ok(_) => try!(ZMsg::new_ok(None)),
-                    Err(e) => try!(ZMsg::new_err(&e.into(), None)),
+                    Ok(_) => try!(ZMsg::new_ok()),
+                    Err(e) => try!(ZMsg::new_err(&e.into())),
                 };
                 try!(msg.pushbytes(&router_id));
                 try!(msg.send(&mut self.router));
